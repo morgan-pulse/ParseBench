@@ -1330,6 +1330,36 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
     )
 
     # =========================================================================
+    # Nemotron-3-Nano-Omni 30B-A3B Reasoning (BF16)
+    # =========================================================================
+
+    # Thinking enabled. Uses the shared parse prompt (byte-identical to
+    # openai/anthropic/gemma4) so this model stays apples-to-apples comparable.
+    # Budget mirrors Gemini's `_thinking_high` (max_tokens=65536,
+    # reasoning_budget=16384 ≈ 10x output headroom); the server needs
+    # max_model_len=131072 to cover prompt + image + output.
+    register_fn(
+        PipelineSpec(
+            pipeline_name="nemotron_omni_30b_vllm_thinking",
+            provider_name="nemotron_omni",
+            product_type=ProductType.PARSE,
+            config={
+                "server_url": "",  # Set via NEMOTRON_OMNI_SERVER_URL or override
+                "model": "nemotron-omni-30b",
+                "enable_thinking": True,
+                "temperature": 0.6,
+                "top_k": None,
+                "top_p": 0.95,
+                "max_tokens": 65536,
+                "reasoning_budget": 16384,
+                # grace_period=1024 per card → thinking_token_budget=16384+1024
+                "thinking_token_budget": 17408,
+                "timeout": 1800,
+            },
+        )
+    )
+
+    # =========================================================================
     # Chandra OCR 2
     # =========================================================================
 
@@ -1999,6 +2029,24 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
             product_type=ProductType.PARSE,
             config={
                 "server_url": "",  # Set via MINERU2605PRO_SERVER_URL or override
+            },
+        )
+    )
+
+    # =========================================================================
+    # MinerU-Diffusion-V1 (opendatalab/MinerU-Diffusion-V1-0320-2.5B)
+    # Diffusion-decoding OCR VLM. Runs the official two-stage parse: layout
+    # detection, then per-region recognition (table -> OTSL, formula -> LaTeX,
+    # else text), merged into markdown with OTSL converted to HTML server-side.
+    # =========================================================================
+
+    register_fn(
+        PipelineSpec(
+            pipeline_name="mineru_diffusion",
+            provider_name="mineru_diffusion",
+            product_type=ProductType.PARSE,
+            config={
+                "server_url": "",  # Set via MINERU_DIFFUSION_SERVER_URL or override
             },
         )
     )

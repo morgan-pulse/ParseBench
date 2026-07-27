@@ -242,6 +242,18 @@ These pipelines require you to deploy the model on your own infrastructure (e.g.
 | `mineru25_vllm` | MinerU2.5-2509-1.2B vLLM server (two-step layout + recognition) | `MINERU25_SERVER_URL` |
 | `mineru2605pro_vllm` | MinerU2.5-Pro-2605-1.2B vLLM server (adds chart/image analysis) | `MINERU2605PRO_SERVER_URL` |
 
+### MinerU-Diffusion
+
+| Pipeline | Description | Env Var |
+|---|---|---|
+| `mineru_diffusion` | MinerU-Diffusion-V1-0320-2.5B server (diffusion-decoding OCR, two-stage layout + recognition) | `MINERU_DIFFUSION_SERVER_URL` |
+
+### Nemotron-Omni
+
+| Pipeline | Description | Env Var |
+|---|---|---|
+| `nemotron_omni_30b_vllm_thinking` | Nemotron-3-Nano-Omni 30B-A3B Reasoning, thinking enabled | `NEMOTRON_OMNI_SERVER_URL` |
+
 ### Surya OCR 2
 
 | Pipeline | Description | Env Var |
