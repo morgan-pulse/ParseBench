@@ -86,9 +86,9 @@ class MinerUDiffusionProvider(Provider):
             return buf.getvalue()
         except ImportError as e:
             raise ProviderPermanentError("pdf2image is required.") from e
+        except ProviderPermanentError:
+            raise
         except Exception as e:
-            if "pdf2image" in str(e).lower():
-                raise
             raise ProviderPermanentError(f"Error converting PDF to image: {e}") from e
 
     def _read_image(self, file_path: Path) -> bytes:
