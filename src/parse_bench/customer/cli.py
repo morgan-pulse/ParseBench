@@ -586,16 +586,38 @@ class CustomerCLI:
 
 
 def _ground_truth_provenance(paths: ProjectPaths, config: Any) -> dict[str, Any]:
-    """Ground-truth counts and provenance for the report header."""
+    """Ground-truth counts and provenance for the report header.
+
+    Provenance is derived from the rules actually on disk, never from config.
+    Naming the configured model on a report whose labels a human wrote would
+    credit a model for someone else's work — the kind of error that costs a
+    report its credibility the moment a reader notices it.
+    """
     summary = dataset_summary(paths)
     total_rules = sum(c["rules"] for c in summary.values())
     verified = sum(c["verified"] for c in summary.values())
+    bootstrapped = sum(c.get("bootstrapped", 0) for c in summary.values())
+
+    # Documents staged via ingest live under data/pdfs/; a project that brought
+    # its own labels keeps them beside those labels anywhere under data/.
     documents = len(staged_documents(paths))
+    if not documents and paths.data_dir.exists():
+        documents = len({p.stem for p in paths.data_dir.rglob("*.pdf")})
+
+    if bootstrapped == 0:
+        source, model = "supplied by you", None
+    elif bootstrapped >= total_rules:
+        source, model = "bootstrapped", config.groundtruth.model
+    else:
+        source, model = "mixed", config.groundtruth.model
+
     return {
         "documents": documents,
         "rules": total_rules,
         "verified": verified,
         "verified_pct": (verified / total_rules * 100) if total_rules else 0.0,
-        "model": config.groundtruth.model,
+        "bootstrapped": bootstrapped,
+        "source": source,
+        "model": model,
         "categories": {name: counts["rules"] for name, counts in sorted(summary.items())},
     }

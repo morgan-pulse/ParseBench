@@ -164,6 +164,7 @@ def dataset_summary(paths: ProjectPaths) -> dict[str, dict[str, int]]:
         rules = 0
         documents: set[str] = set()
         verified = 0
+        bootstrapped = 0
         with jsonl_path.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -177,10 +178,13 @@ def dataset_summary(paths: ProjectPaths) -> dict[str, dict[str, int]]:
                 documents.add(str(row.get("pdf", "")))
                 if row.get("verified"):
                     verified += 1
+                if BOOTSTRAP_TAG in (row.get("tags") or []):
+                    bootstrapped += 1
         summary[jsonl_path.stem] = {
             "rules": rules,
             "documents": len(documents),
             "verified": verified,
+            "bootstrapped": bootstrapped,
         }
 
     summary.update(_sidecar_summary(paths))
@@ -205,7 +209,7 @@ def _sidecar_summary(paths: ProjectPaths) -> dict[str, dict[str, int]]:
         rules = config.get("test_rules") or []
         if not isinstance(rules, list):
             continue
-        entry = summary.setdefault(category, {"rules": 0, "documents": 0, "verified": 0})
+        entry = summary.setdefault(category, {"rules": 0, "documents": 0, "verified": 0, "bootstrapped": 0})
         entry["rules"] += len(rules)
         entry["documents"] += 1
         # Sidecar datasets are hand-built, so their rules count as verified

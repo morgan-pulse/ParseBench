@@ -120,3 +120,58 @@ class TestRenderers:
         assert set(written) == {"html", "markdown", "json"}
         for path in written.values():
             assert path.exists() and path.stat().st_size > 0
+
+
+class TestHeaderProvenance:
+    """The header must describe the ground truth that is actually on disk.
+
+    Naming the configured model on a report whose labels a human wrote credits
+    a model for someone else's work. On a customer-facing artifact that is
+    worse than a missing field — it is a false claim a reader can catch.
+    """
+
+    def _data(self, **gt) -> dict:
+        config = new_config("Acme", ["base", "chal"], baseline="base")
+        return build_report_data(config, _scores(base=0.5, chal=0.8), ground_truth=gt)
+
+    def test_customer_supplied_labels_name_no_model(self) -> None:
+        data = self._data(documents=26, rules=265, verified_pct=100.0, source="supplied by you", model=None)
+        html_out = render_html(data)
+        md_out = render_markdown(data)
+        assert "supplied by you" in html_out
+        assert "gemini" not in html_out.lower()
+        assert "gemini" not in md_out.lower()
+
+    def test_bootstrapped_labels_name_the_model(self) -> None:
+        data = self._data(documents=12, rules=400, verified_pct=0.0, source="bootstrapped", model="google/gemini-3-pro")
+        assert "google/gemini-3-pro" in render_html(data)
+        assert "google/gemini-3-pro" in render_markdown(data)
+
+    def test_document_count_is_shown(self) -> None:
+        assert ">26<" in render_html(self._data(documents=26, rules=265, source="supplied by you"))
+
+
+class TestSingleDimensionReport:
+    def test_overall_block_is_suppressed_for_one_dimension(self) -> None:
+        # With one dimension the macro-average restates the table below it, and
+        # a "Dimensions: 1" column invites the reader to ask what the other
+        # four were.
+        config = new_config("Acme", ["base", "chal"], baseline="base")
+        data = build_report_data(config, _scores(base=0.5, chal=0.8))
+        assert len(data["categories"]) == 1
+        assert "Macro-average across dimensions" not in render_html(data)
+        assert "## Overall" not in render_markdown(data)
+
+    def test_overall_block_is_kept_for_several_dimensions(self) -> None:
+        config = new_config("Acme", ["base", "chal"], baseline="base")
+        scores = _scores(base=0.5, chal=0.8)
+        scores["chart"] = CategoryScores(
+            category="chart",
+            metric="rule_pass_rate",
+            by_pipeline={
+                "base": {f"chart/doc{i}": 0.4 for i in range(12)},
+                "chal": {f"chart/doc{i}": 0.6 for i in range(12)},
+            },
+        )
+        data = build_report_data(config, scores)
+        assert "Macro-average across dimensions" in render_html(data)

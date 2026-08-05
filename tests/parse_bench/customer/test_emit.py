@@ -256,3 +256,23 @@ class TestSidecarGroundTruth:
         cases = load_test_cases(paths.data_dir, product_type=ProductType.PARSE.value)
         assert [c.group for c in cases] == ["energy"]
         assert len(cases[0].test_rules) == 4
+
+
+class TestBootstrapProvenanceCounts:
+    def test_generated_rules_are_counted_as_bootstrapped(self, tmp_path: Path) -> None:
+        paths = _project(tmp_path, {"text": ["claim_01"]})
+        write_dataset(paths, [_document("text", "claim_01", ["text_content"])])
+        summary = dataset_summary(paths)["text_content"]
+        assert summary["bootstrapped"] == summary["rules"]
+
+    def test_sidecar_rules_are_not_counted_as_bootstrapped(self, tmp_path: Path) -> None:
+        # Hand-built labels must never be attributed to the ground-truth model.
+        paths = ProjectPaths(tmp_path)
+        paths.ensure_dirs()
+        group_dir = paths.data_dir / "energy"
+        group_dir.mkdir(parents=True, exist_ok=True)
+        (group_dir / "a.pdf").write_bytes(b"%PDF-1.4\n")
+        (group_dir / "a.test.json").write_text(
+            json.dumps({"test_rules": [{"type": "present", "text": "x"}]}), encoding="utf-8"
+        )
+        assert dataset_summary(paths)["energy"]["bootstrapped"] == 0

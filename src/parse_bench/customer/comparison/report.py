@@ -138,15 +138,17 @@ def render_markdown(data: dict[str, Any]) -> str:
 
     gt = data.get("ground_truth") or {}
     if gt:
+        provenance = str(gt.get("source") or "")
+        if gt.get("model"):
+            provenance = f"{provenance} with `{gt['model']}`"
         lines.append(
             f"Ground truth: {gt.get('documents', 0)} document(s), "
             f"{gt.get('rules', 0)} rule(s), "
-            f"{gt.get('verified_pct', 0):.0f}% human-verified"
-            + (f", bootstrapped with `{gt['model']}`" if gt.get("model") else "")
+            f"{gt.get('verified_pct', 0):.0f}% human-verified" + (f" — {provenance}" if provenance else "")
         )
         lines.append("")
 
-    if data["overall"]:
+    if data["overall"] and len(data["categories"]) > 1:
         lines.append("## Overall (macro-average across dimensions)")
         lines.append("")
         lines.append("| Pipeline | Overall | Dimensions |")
@@ -348,14 +350,18 @@ def render_html(data: dict[str, Any]) -> str:
     parts.append(f'<div><div class="k">Documents</div><div class="v">{gt.get("documents", 0)}</div></div>')
     parts.append(f'<div><div class="k">Rules</div><div class="v">{gt.get("rules", 0)}</div></div>')
     parts.append(f'<div><div class="k">Human-verified</div><div class="v">{gt.get("verified_pct", 0):.0f}%</div></div>')
-    if gt.get("model"):
-        parts.append(
-            f'<div><div class="k">Ground truth from</div><div class="v">{html.escape(str(gt["model"]))}</div></div>'
-        )
+    if gt.get("source"):
+        source = str(gt["source"])
+        if gt.get("model"):
+            source = f"{source} · {gt['model']}"
+        parts.append(f'<div><div class="k">Ground truth</div><div class="v">{html.escape(source)}</div></div>')
     parts.append(f'<div><div class="k">Pipelines</div><div class="v">{len(data["pipelines"])}</div></div>')
     parts.append("</div></div>")
 
-    if data["overall"]:
+    # With a single dimension the macro-average just restates the table below
+    # it, and a "Dimensions: 1" column invites the reader to wonder what the
+    # other four were.
+    if len(data["overall"]) > 0 and len(data["categories"]) > 1:
         parts.append("<h2>Overall</h2>")
         parts.append('<p class="sub">Macro-average across dimensions — each dimension weighted equally.</p>')
         parts.append('<div class="card"><table><thead><tr><th>Pipeline</th>')
