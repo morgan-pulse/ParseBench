@@ -7,6 +7,7 @@ import fire
 from dotenv import load_dotenv
 
 from parse_bench.analysis.cli import AnalysisCLI
+from parse_bench.customer.cli import CustomerCLI
 from parse_bench.data.cli import DataCLI
 from parse_bench.evaluation.cli import EvaluationCLI
 from parse_bench.inference.cli import InferenceCLI
@@ -52,6 +53,8 @@ class BenchCLI:
         pipelines    List available pipeline configurations
         compare      Compare two pipeline results
         serve        View reports in browser with PDF support
+        customer     Guided evaluation on your own documents (init/ingest/
+                     groundtruth/run/report)
 
     Advanced subcommands:
         inference    Run inference only
@@ -67,6 +70,7 @@ class BenchCLI:
         self.analysis = AnalysisCLI()
         self.pipeline = PipelineCLI()
         self.data = DataCLI()
+        self.customer = CustomerCLI()
 
     # ── Top-level convenience commands ──────────────────────────────
 

@@ -196,6 +196,39 @@ uv run parse-bench analysis generate_dashboard --evaluation_dir ./output/<pipeli
 
 </details>
 
+## Evaluating on Your Own Documents
+
+The benchmark above runs on a public dataset. If you need to know how these
+tools perform on *your* documents — and you can't share them — run the same
+harness locally on your own data:
+
+```bash
+# Scaffold a project, choosing the tools you want to compare
+uv run parse-bench customer init ./my-eval --pipelines llamaparse_agentic,extend_parse
+
+# Drop your documents into ./my-eval/docs/, add API keys to ./my-eval/.env, then:
+uv run parse-bench customer ingest ./my-eval
+uv run parse-bench customer groundtruth ./my-eval   # --dry_run first for a cost estimate
+uv run parse-bench customer run ./my-eval
+uv run parse-bench customer report ./my-eval
+```
+
+Everything stays on your machine. Documents are sent only to the parsing APIs
+you configure, plus the ground-truth model during `groundtruth` — a step you can
+skip entirely by supplying your own labels.
+
+If you don't have ground truth, ParseBench can bootstrap it: a vision model
+transcribes each page, and the evaluation rules are derived from that
+transcription by deterministic code using the evaluator's own tokenizers. No
+model judges any output — scoring stays rule-based either way.
+
+The report gives a paired statistical comparison — per-document differences,
+bootstrap confidence intervals, Holm-corrected Wilcoxon p-values, and win/loss
+counts — rather than a side-by-side eyeball of a few files.
+
+See [docs/customer_eval.md](docs/customer_eval.md) for the full walkthrough,
+including ground-truth provenance, cost, and how to bring your own labels.
+
 <details>
 <summary><strong>Evaluating Your Own Tool</strong></summary>
 
@@ -252,6 +285,7 @@ ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic a
 | `parse-bench compare` | Compare results from two parsing tools side-by-side |
 | `parse-bench leaderboard` | Generate a leaderboard across all evaluated tools |
 | `parse-bench serve` | View HTML reports in your browser (with PDF rendering support) |
+| `parse-bench customer` | Guided evaluation on your own documents (`init`, `ingest`, `groundtruth`, `run`, `report`, `status`, `keys`) |
 
 Advanced subcommands: `inference`, `evaluation`, `analysis`, `pipeline`, `data`
 
@@ -297,6 +331,11 @@ src/parse_bench/
 │   ├── evaluators/                  # Product-specific evaluators (parse, extract, layout)
 │   ├── metrics/                     # Metric implementations (TEDS, GriTS, rules, IoU)
 │   └── reports/                     # CSV, HTML, markdown export
+├── customer/                        # Guided evaluation on your own documents
+│   ├── cli.py                       # init / ingest / groundtruth / run / report
+│   ├── project.py                   # Project layout, config, API-key discovery
+│   ├── groundtruth/                 # Page transcription -> derived rules
+│   └── comparison/                  # Paired statistics + customer report
 ├── analysis/
 │   ├── aggregation_report.py        # Multi-category dashboard
 │   ├── detailed_report.py           # Interactive per-category HTML report

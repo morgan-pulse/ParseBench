@@ -30,6 +30,20 @@ def register_provider(provider_name: str) -> Callable[[type[Provider]], type[Pro
     return decorator
 
 
+def get_provider_class(provider_name: str) -> type[Provider] | None:
+    """
+    Look up a registered Provider class without instantiating it.
+
+    Useful for introspection (e.g. discovering which environment variables a
+    provider reads) where constructing the provider would fail on missing
+    credentials.
+
+    :param provider_name: Registered provider name (e.g. "llama")
+    :return: Provider class, or None if not registered
+    """
+    return _PROVIDER_REGISTRY.get(provider_name)
+
+
 def create_provider(pipeline: PipelineSpec) -> Provider:
     """
     Instantiate a Provider for the given PipelineSpec.
