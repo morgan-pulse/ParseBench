@@ -1,19 +1,281 @@
-# ParseBench
+# ParseBench — evaluate document parsers on your own documents
 
 [![Website](https://img.shields.io/badge/Website-parsebench.ai-blue)](https://parsebench.ai)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.08538-b31b1b.svg)](https://arxiv.org/abs/2604.08538)
 [![Dataset](https://img.shields.io/badge/HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/llamaindex/ParseBench)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
-**ParseBench** is a benchmark for evaluating how well document parsing tools convert PDFs into structured output that AI agents can reliably act on. It tests whether parsed output preserves the structure and meaning needed for autonomous decisions — not just whether it looks similar to a reference text.
+Choosing a document parsing tool usually comes down to a vendor demo on a
+handful of pages, or an internal bake-off where "which output looks better?"
+gets decided by eye. Neither survives contact with a production workload.
 
-The benchmark covers ~2,000 human-verified pages from real enterprise documents (insurance, finance, government), organized around five capability dimensions, each targeting a failure mode that breaks production agent workflows.
+This repository is a benchmark that measures whether parsed output preserves
+the structure and meaning an agent needs to act on — and it runs **on your own
+documents, on your own machine**. Your files are sent only to the parsing APIs
+you choose to evaluate. Nothing else leaves.
+
+```bash
+uv sync --extra runners
+
+uv run parse-bench customer init ./my-eval --pipelines llamaparse_agentic,reducto,extend_parse
+# drop your documents into ./my-eval/docs/, add API keys to ./my-eval/.env
+uv run parse-bench customer ingest ./my-eval
+uv run parse-bench customer groundtruth ./my-eval
+uv run parse-bench customer run ./my-eval
+uv run parse-bench customer report ./my-eval
+```
 
 <p align="center">
   <img src="docs/parsebench_teaser.png" alt="ParseBench overview: five capability dimensions" width="100%">
 </p>
 
-## Leaderboard
+---
+
+## Why this exists
+
+Three things usually go wrong when a team evaluates parsers on real documents.
+
+**The documents can't be shared.** Contracts, claims files, and medical records
+cannot be uploaded to a vendor for a bake-off, so the evaluation either doesn't
+happen or happens on unrepresentative sample data. Everything here runs
+locally, so the question "can we send you our documents?" never comes up.
+
+**There is no ground truth.** Without it, "which output is better?" is a matter
+of taste, and whoever's output is inspected first sets the standard. This
+repository can bootstrap ground truth from your documents (below), or use
+labels you already have.
+
+**One tool's output gets used as the answer key.** It is a natural shortcut and
+it silently decides the result: whichever tool produced the reference wins,
+because every difference is scored as the other tool's error. A real reference
+has to be independent of every tool being measured.
+
+## What you get
+
+A paired, per-document statistical comparison — not a side-by-side eyeball:
+
+```
+Tables (grits_trm_composite)
+  * parser_a          80.0  (n=26)      95% CI 71.1–88.4
+    parser_b          75.9  (n=26)      95% CI 67.4–84.0
+    parser_c          62.6  (n=26)      95% CI 51.2–73.7
+
+  parser_b vs baseline — No significant difference (4.2 point gap, p=0.258, n=26).
+  parser_c vs baseline — parser_a is better by 17.4 points
+                         (95% CI -27.5 to -8.6, p=0.0009, n=26).
+```
+
+Every tool is scored on the same documents, so differences are measured per
+document and then aggregated — which controls for the fact that some documents
+are simply harder. You get a confidence interval, a significance test, and
+win/loss/tie counts, so a 17-point gap and a 4-point gap are not presented as
+the same kind of finding. Dimensions with fewer than 10 documents are flagged
+**underpowered** rather than reported as wins.
+
+Output lands in `reports/` as HTML (to read), markdown (to paste into an
+email), and JSON (to do your own analysis on).
+
+## What gets measured
+
+Five dimensions, each targeting a failure mode that breaks agent workflows:
+
+| Dimension | What it catches | Metric |
+|---|---|---|
+| **Tables** | Merged cells and hierarchical headers. A misaligned header means the agent reads the wrong column. | GriTS + TableRecordMatch |
+| **Content faithfulness** | Omissions, hallucinations, reading-order violations. Incomplete or fabricated context compromises every downstream decision. | Content Faithfulness Score |
+| **Semantic formatting** | Formatting that carries meaning — strikethrough, super/subscript, bold, heading hierarchy. A struck-through price is not the current price. | Semantic Formatting Score |
+| **Charts** | Exact data points with correct series and axis labels. Most parsers return raw text, leaving agents unable to read precise values. | ChartDataPointMatch |
+| **Visual grounding** | Tracing every extracted element back to its location on the page. Required wherever values must be auditable. | Element Pass Rate |
+
+Scoring is deterministic and rule-based throughout. **No language model judges
+any output.**
+
+## Where ground truth comes from
+
+If you already have labels, skip this step — `customer groundtruth` is the only
+command that calls a model, and without it no document reaches anything except
+the parsers you are evaluating. See [bring your own ground truth](#bring-your-own-ground-truth).
+
+Otherwise ParseBench can bootstrap it, and the division of labour is the part
+worth understanding:
+
+> **A vision model transcribes each page. ParseBench derives the rules.**
+
+The model is given one job — transcribe this page into markdown, preserving
+table structure and meaningful formatting. It is never asked to write
+evaluation rules, and it is never asked to judge a parser. From that
+transcription, deterministic code derives the rules using *the evaluator's own
+tokenizers*, so expected and actual text are normalized identically and a rule
+can never fail because the two sides disagreed about what a word is.
+
+Two things follow, and both matter when someone challenges a result:
+
+- **Scoring stays deterministic.** A model wrote a reference *document*; no
+  model scores anything.
+- **The reference is inspectable.** Transcriptions land in
+  `data/_groundtruth/**.md` as plain markdown. Read them. Correct them. The
+  next run picks the corrections up — rules are derived from the files on disk.
+
+Everything generated is marked `verified: false` and tagged `bootstrap`, and
+the report states the human-verified percentage in its header, so bootstrapped
+labels can't be mistaken for confirmed ones.
+
+Budget roughly **$0.70 per page**; `--dry_run` prints the estimate before
+anything is spent. That is the cost of manufacturing reference data, not of
+parsing — production parsing is orders of magnitude cheaper.
+
+**Visual grounding is not bootstrapped.** Bounding boxes from a vision model
+are not accurate enough to rely on, so that dimension needs hand-drawn boxes
+via [`apps/annotator`](apps/annotator) or coordinates you already have.
+
+## What leaves your machine
+
+| Step | Network calls |
+|---|---|
+| `init`, `ingest`, `report` | none |
+| `groundtruth` | page images → the model endpoint you configure (skip entirely if you have labels) |
+| `run` | your documents → the parsing APIs you selected, and nowhere else |
+
+The ground-truth model is reached over an OpenAI-compatible endpoint, so it can
+point at OpenRouter, Azure OpenAI, or an internal gateway — configurable in
+`parsebench_customer.json`. Self-hosted parsers can be evaluated with no
+outbound calls at all.
+
+## Which tools you can compare
+
+90+ pipelines are registered — hosted APIs, frontier VLMs, open-weight models,
+and local libraries. Run `uv run parse-bench pipelines`, or see
+[docs/pipelines.md](docs/pipelines.md).
+
+You only need credentials for the tools you actually select. `customer init`
+writes a `.env` listing exactly those, discovered from the provider code:
+
+```bash
+uv run parse-bench customer keys ./my-eval    # what's needed, what's set
+```
+
+If a tool you care about isn't registered, add it with [Claude Code](https://claude.ai/code):
+
+```bash
+/integrate-pipeline <name> <API docs or SDK link>
+```
+
+## Bring your own ground truth
+
+Both dataset formats load through the stock loader — your numbers stay
+comparable to the public benchmark rather than a private fork of it.
+
+**Sidecar** — often what an existing internal benchmark already looks like.
+Put `<name>.test.json` next to each PDF under `data/<group>/`:
+
+```json
+{"expected_markdown": "...", "tags": ["contracts"],
+ "test_rules": [{"type": "present", "text": "...", "max_l_dist": 5}]}
+```
+
+**JSONL** — one rule per line in `data/{category}.jsonl`, plus
+`data/expected_markdown.json` mapping each PDF to its reference:
+
+```json
+{"pdf": "pdfs/text/policy_01.pdf", "category": "text_content",
+ "id": "policy_01::order::1", "type": "order", "verified": true,
+ "rule": {"before": "the insured party is acme limited",
+          "after": "coverage begins on 1 january 2026"}}
+```
+
+`apps/annotator/rule_definitions.json` documents every rule type and its
+fields. A hybrid is often strongest: bootstrap the bulk, hand-verify a held-out
+subset, and report both — agreement between the two earns the bootstrapped
+labels their credibility on your data specifically.
+
+> **Reusing an internal benchmark?** If its thresholds were ever loosened while
+> looking at one parser's output, that parser has a head start. The check is
+> cheap: split the documents into those a recalibration pass touched and those
+> it didn't, and confirm the ranking survives on the untouched subset.
+
+## Documentation
+
+| Document | For |
+|---|---|
+| [`src/parse_bench/customer/README.md`](src/parse_bench/customer/README.md) | How the workflow is built — architecture, why rules are derived rather than authored, the statistics |
+| [`docs/customer_eval.md`](docs/customer_eval.md) | Running an evaluation end to end, cost, reading the report, objection handling |
+| [`docs/pipelines.md`](docs/pipelines.md) | Every registered parsing tool |
+
+## CLI reference
+
+| Command | Description |
+|---|---|
+| `parse-bench customer init` | Scaffold an evaluation project |
+| `parse-bench customer ingest` | Stage your documents into the dataset |
+| `parse-bench customer groundtruth` | Bootstrap ground truth (`--dry_run` to price it) |
+| `parse-bench customer run` | Evaluate every configured tool |
+| `parse-bench customer report` | Statistical comparison report |
+| `parse-bench customer status` | Progress and next step |
+| `parse-bench customer keys` | Which credentials are needed and set |
+| `parse-bench run` | Run a tool against the public benchmark dataset |
+| `parse-bench download` / `status` | Manage the public dataset |
+| `parse-bench pipelines` | List available tools |
+| `parse-bench compare` / `leaderboard` / `serve` | Compare, rank, and view reports |
+
+Advanced subcommands: `inference`, `evaluation`, `analysis`, `pipeline`, `data`.
+
+<details>
+<summary><strong>Project layout</strong></summary>
+
+```
+my-eval/
+├── parsebench_customer.json     # tools, dimensions, ground-truth settings
+├── .env                         # only the keys your selected tools need
+├── docs/                        # your documents (table/ chart/ text/ optional)
+├── data/                        # generated dataset
+│   ├── {category}.jsonl
+│   ├── expected_markdown.json
+│   ├── pdfs/{group}/
+│   └── _groundtruth/**.md       # reference transcriptions — review these
+├── output/<tool>/               # inference + evaluation results
+└── reports/                     # comparison_report.{html,md,json}
+```
+
+</details>
+
+<details>
+<summary><strong>Environment variables</strong></summary>
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARSEBENCH_FAST_TEDS` | `1` | Fast Zhang-Shasha TEDS table metric (uses `numba` when the `fast` extra is installed, otherwise an exact pure-Python fallback). Set to `0` to force the original APTED implementation — scores are identical either way. |
+
+Add the `fast` extra for a JIT-accelerated table metric:
+`uv sync --extra runners --extra fast`
+
+</details>
+
+---
+
+## The public benchmark
+
+The same harness, run on a public dataset — useful as a starting point, and as
+a sanity check that a tool behaves on your documents the way it does in the
+open.
+
+The dataset covers ~2,000 human-verified pages from real enterprise documents
+(insurance, finance, government), hosted on HuggingFace as
+[`llamaindex/ParseBench`](https://huggingface.co/datasets/llamaindex/ParseBench):
+
+| Dimension | Metric | Pages | Docs | Rules |
+|-----------|--------|------:|-----:|------:|
+| Tables | GTRM (GriTS + TableRecordMatch) | 503 | 284 | --- |
+| Charts | ChartDataPointMatch | 568 | 99 | 4,864 |
+| Content Faithfulness | Content Faithfulness Score | 506 | 506 | 141,322 |
+| Semantic Formatting | Semantic Formatting Score | 476 | 476 | 5,997 |
+| Visual Grounding | Element Pass Rate | 500 | 321 | 16,325 |
+| **Total (unique)** | | **2,078** | **1,211** | **169,011** |
+
+```bash
+uv run parse-bench run llamaparse_agentic --test   # 3 files per category
+uv run parse-bench run llamaparse_agentic          # full benchmark
+uv run parse-bench serve llamaparse_agentic        # view reports
+```
 
 <!-- LEADERBOARD:START -->
 _Top 10 by Overall score. For the full sortable, filterable leaderboard, see [parsebench.ai](https://parsebench.ai); for raw data, see [leaderboard.csv](leaderboard.csv)._
@@ -21,7 +283,7 @@ _Top 10 by Overall score. For the full sortable, filterable leaderboard, see [pa
 | Rank | Provider | Category | Overall | Tables | Charts | Content Faith. | Sem. Format. | Visual Ground. | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---:|
 | 1 | LlamaParse Agentic | LlamaParse | 84.88 | 90.74 | 78.11 | 89.68 | 85.24 | 80.62 | 1.25¢ |
-| 2 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15¢ |
+| 2 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15.00¢ |
 | 3 | LlamaParse Cost Effective | LlamaParse | 76.77 | 81.42 | 70.15 | 90.92 | 68.78 | 72.59 | 0.38¢ |
 | 4 | KDL-Frontier-Parser-nano | VLM - Open Weight | 76.36 | 85.56 | 63.41 | 87.19 | 66.81 | 78.84 | — |
 | 5 | Extend (2.0) | Commercial - Startup APIs | 75.33 | 84.82 | 78.31 | 84.59 | 60.31 | 68.61 | 2.50¢ |
@@ -32,329 +294,14 @@ _Top 10 by Overall score. For the full sortable, filterable leaderboard, see [pa
 | 10 | Reducto (Agentic) | Commercial - Startup APIs | 72.97 | 80.42 | 73.4 | 86.37 | 57.6 | 67.07 | 4.76¢ |
 <!-- LEADERBOARD:END -->
 
-**Inclusion criteria:**
-1. The model or API needs to be publicly accessible, either via open weights or a self-serve API that any user can sign up for.
-2. The benchmark run needs to finish within a reasonable time (roughly single-digit hours).
-3. We can adjust concurrency based on the provider's recommended settings, but providers should not require custom framework changes, so the evaluation stays fair across models.
-
-## Quick Start
-
-**Prerequisites:** Create a `.env` file with the API key for the parsing tool you want to evaluate (see [Configuration](#configuration) for details).
-
-```bash
-# Install
-uv sync --extra runners
-
-# Optional: add the `fast` extra for a JIT-accelerated TEDS table metric (numba).
-# Scores are identical to the default path — just faster on large tables.
-uv sync --extra runners --extra fast
-
-# Quick test run (small dataset, 3 files per category — good for trying things out)
-uv run parse-bench run llamaparse_agentic --test
-
-# Full benchmark run (replace llamaparse_agentic with any pipeline name, see "Available Pipelines" below)
-uv run parse-bench run llamaparse_agentic
-
-# View interactive reports in your browser
-uv run parse-bench serve llamaparse_agentic
-```
-
-## Available Pipelines
-
-A **pipeline** is a document parsing tool or configuration that you want to evaluate. There are 90+ pipelines available -- see [docs/pipelines.md](docs/pipelines.md) for the full list, or run `uv run parse-bench pipelines`.
-
-<details>
-<summary><strong>Paper baselines (21 pipelines)</strong></summary>
-
-| Pipeline name | Name in paper |
-|---------------|---------------|
-| `llamaparse_agentic` | LlamaParse Agentic |
-| `llamaparse_cost_effective` | LlamaParse Cost Effective |
-| `openai_gpt5_mini_reasoning_medium_parse_with_layout_file` | OpenAI GPT-5 Mini (Reasoning Medium) |
-| `openai_gpt5_mini_reasoning_minimal_parse_with_layout_file` | OpenAI GPT-5 Mini (Reasoning Minimal) |
-| `openai_gpt_5_4_parse_with_layout_file` | OpenAI GPT-5.4 |
-| `anthropic_haiku_parse_with_layout_file` | Anthropic Haiku 4.5 (Disable Thinking) |
-| `anthropic_haiku_thinking_parse_with_layout_file` | Anthropic Haiku 4.5 (Thinking) |
-| `anthropic_opus_4_6_parse_with_layout_file` | Anthropic Opus 4.6 |
-| `google_gemini_3_flash_thinking_minimal_parse_with_layout_file` | Google Gemini 3 Flash (Thinking Minimal) |
-| `google_gemini_3_flash_thinking_high_parse_with_layout_file` | Google Gemini 3 Flash (Thinking High) |
-| `google_gemini_3_1_pro_parse_with_layout_file` | Google Gemini 3.1 Pro |
-| `azure_di_layout` | Azure Document Intelligence |
-| `aws_textract` | AWS Textract |
-| `google_docai_layout` | Google Cloud Document AI |
-| `reducto` | Reducto |
-| `reducto_agentic` | Reducto (Agentic) |
-| `extend_parse` | Extend |
-| `landingai_parse` | LandingAI |
-| `qwen3_5_4b_vllm_parse` | Qwen 3 VL |
-| `dots_ocr_1_5_parse` | Dots OCR 1.5 |
-| `docling_parse` | Docling |
-
-</details>
-
-## Dataset
-
-Hosted on HuggingFace: [`llamaindex/ParseBench`](https://huggingface.co/datasets/llamaindex/ParseBench)
-
-The dataset is stratified into five capability dimensions, each with its own ground-truth format and evaluation metric:
-
-| Dimension | File(s) | Metric | Pages | Docs | Rules |
-|-----------|---------|--------|------:|-----:|------:|
-| **Tables** | `table.jsonl` | GTRM (GriTS + TableRecordMatch) | 503 | 284 | --- |
-| **Charts** | `chart.jsonl` | ChartDataPointMatch | 568 | 99 | 4,864 |
-| **Content Faithfulness** | `text_content.jsonl` | Content Faithfulness Score | 506 | 506 | 141,322 |
-| **Semantic Formatting** | `text_formatting.jsonl` | Semantic Formatting Score | 476 | 476 | 5,997 |
-| **Visual Grounding** | `layout.jsonl` | Element Pass Rate | 500 | 321 | 16,325 |
-| **Total (unique)** | | | **2,078** | **1,211** | **169,011** |
-
-Content Faithfulness and Semantic Formatting share the same 507 underlying text documents, evaluated with different rule sets. Totals reflect unique pages and documents. Tables uses a continuous metric (no discrete rules).
-
-**What each dimension tests and why it matters for agents:**
-
-- **Tables** — Structural fidelity of merged cells and hierarchical headers. A misaligned header means the agent reads the wrong column when looking up a value.
-- **Charts** — Exact data point extraction with correct series and axis labels from bar, line, pie, and compound charts. Most parsers return raw text instead of structured data, leaving agents unable to extract precise values.
-- **Content Faithfulness** — Omissions, hallucinations, and reading-order violations. If the agent's context is incomplete or contains fabricated content, every downstream decision is compromised.
-- **Semantic Formatting** — Preservation of formatting that carries meaning: strikethrough (marks superseded content), superscript/subscript (footnotes, formulas), bold (defined terms, key values), and title hierarchy. A strikethrough price is not the current price.
-- **Visual Grounding** — Tracing every extracted element back to its source location on the page. Required for auditability in regulated workflows where every value must be traceable.
-
-The dataset is automatically downloaded when you run a pipeline. To manage it manually:
-
-```bash
-# Download the full dataset
-uv run parse-bench download
-
-# Download a small test dataset (3 files per category, good for trying things out)
-uv run parse-bench download --test
-
-# Check whether the dataset has been downloaded and show summary statistics
-uv run parse-bench status
-```
-
-## Usage
-
-### Running the Benchmark
-
-The `run` command runs inference (calls the parsing tool), evaluates the results against ground truth, and generates reports:
-
-```bash
-# Evaluate a parsing tool on all five dimensions
-uv run parse-bench run <pipeline_name>
-
-# Evaluate on a single dimension only (e.g., chart, table, layout, text_content, text_formatting)
-uv run parse-bench run <pipeline_name> --group chart
-
-# Skip calling the parsing tool — just re-evaluate existing results
-uv run parse-bench run <pipeline_name> --skip_inference
-
-# Control how many pages are processed in parallel
-uv run parse-bench run <pipeline_name> --max_concurrent 10
-
-# Run on the small test dataset only (3 files per category, good for trying things out)
-uv run parse-bench run <pipeline_name> --test
-```
-
-When running all dimensions, the benchmark produces:
-- Per-dimension detailed HTML reports with drill-down per test case
-- An aggregation dashboard showing all dimensions side-by-side
-- A leaderboard comparing all evaluated tools in the output directory
-- CSV, Markdown, and JSON exports per dimension
-
-### Viewing & Comparing Results
-
-```bash
-# View reports in your browser (needed because browsers block PDF rendering from file:// URLs)
-uv run parse-bench serve <pipeline_name>
-
-# Compare two parsing tools side-by-side
-uv run parse-bench compare <pipeline_a> <pipeline_b>
-
-# Generate a leaderboard across all evaluated tools
-uv run parse-bench leaderboard
-
-# Leaderboard for specific tools only
-uv run parse-bench leaderboard llamaparse_agentic llamaparse_cost_effective
-```
-
-<details>
-<summary><strong>Advanced Subcommands</strong></summary>
-
-For fine-grained control over individual steps:
-
-```bash
-# Run inference only (call the parsing tool, don't evaluate)
-uv run parse-bench inference run <pipeline_name>
-
-# Run evaluation only (on existing inference results)
-uv run parse-bench evaluation run --output_dir ./output/<pipeline_name>
-
-# Generate detailed HTML report from evaluation results
-uv run parse-bench analysis generate_report --evaluation_dir ./output/<pipeline_name>
-
-# Regenerate the aggregation dashboard
-uv run parse-bench analysis generate_dashboard --evaluation_dir ./output/<pipeline_name>
-```
-
-</details>
-
-## Evaluating on Your Own Documents
-
-The benchmark above runs on a public dataset. If you need to know how these
-tools perform on *your* documents — and you can't share them — run the same
-harness locally on your own data:
-
-```bash
-# Scaffold a project, choosing the tools you want to compare
-uv run parse-bench customer init ./my-eval --pipelines llamaparse_agentic,extend_parse
-
-# Drop your documents into ./my-eval/docs/, add API keys to ./my-eval/.env, then:
-uv run parse-bench customer ingest ./my-eval
-uv run parse-bench customer groundtruth ./my-eval   # --dry_run first for a cost estimate
-uv run parse-bench customer run ./my-eval
-uv run parse-bench customer report ./my-eval
-```
-
-Everything stays on your machine. Documents are sent only to the parsing APIs
-you configure, plus the ground-truth model during `groundtruth` — a step you can
-skip entirely by supplying your own labels.
-
-If you don't have ground truth, ParseBench can bootstrap it: a vision model
-transcribes each page, and the evaluation rules are derived from that
-transcription by deterministic code using the evaluator's own tokenizers. No
-model judges any output — scoring stays rule-based either way.
-
-The report gives a paired statistical comparison — per-document differences,
-bootstrap confidence intervals, Holm-corrected Wilcoxon p-values, and win/loss
-counts — rather than a side-by-side eyeball of a few files.
-
-- [`src/parse_bench/customer/README.md`](src/parse_bench/customer/README.md) — how
-  the workflow is built: architecture, why ground truth is derived rather than
-  authored, the statistics, and a reproducible worked example.
-- [`docs/customer_eval.md`](docs/customer_eval.md) — walkthrough for running an
-  evaluation with someone: ground-truth provenance, cost, bringing your own
-  labels, and objection handling.
-
-<details>
-<summary><strong>Evaluating Your Own Tool</strong></summary>
-
-To add a new parsing tool to ParseBench, use [Claude Code](https://claude.ai/code):
-
-```bash
-/integrate-pipeline <name> <API docs or SDK link>
-```
-
-This creates the provider, registers the pipeline, and updates docs. The skill definition lives in [`.claude/commands/integrate-pipeline.md`](.claude/commands/integrate-pipeline.md) and can be adapted for other AI coding agents.
-
-</details>
-
-## Configuration
-
-### API Keys
-
-Each pipeline calls a specific parsing tool's API. You only need the API key for the tool you want to evaluate — add it to a `.env` file at the project root:
-
-```bash
-# Only add the keys you need. For example, to evaluate LlamaParse:
-LLAMA_CLOUD_API_KEY=...
-
-# Optional: point LlamaParse at a custom API base URL,
-# e.g. http://localhost:8000. Takes precedence over staging/EU/prod selection.
-LLAMA_CLOUD_BASE_URL=...
-
-# To evaluate OpenAI-based pipelines:
-OPENAI_API_KEY=...
-
-# To evaluate Anthropic-based pipelines:
-ANTHROPIC_API_KEY=...
-
-# To evaluate Google-based pipelines:
-GOOGLE_API_KEY=...
-```
-
-ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic and rule-based. API keys are only used to call the parsing tool being evaluated.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PARSEBENCH_FAST_TEDS` | `1` | Fast Zhang-Shasha TEDS table metric (uses the `numba` JIT when the [`fast` extra](#quick-start) is installed, otherwise an exact pure-Python fallback). Set to `0` to force the original APTED implementation — scores are identical either way, so this is only needed for debugging or benchmarking. |
-
-### CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `parse-bench run` | Evaluate a parsing tool end-to-end (inference + evaluation + reports) |
-| `parse-bench download` | Download the benchmark dataset from HuggingFace |
-| `parse-bench status` | Check whether the dataset has been downloaded |
-| `parse-bench pipelines` | List all available parsing tools / pipeline configurations |
-| `parse-bench compare` | Compare results from two parsing tools side-by-side |
-| `parse-bench leaderboard` | Generate a leaderboard across all evaluated tools |
-| `parse-bench serve` | View HTML reports in your browser (with PDF rendering support) |
-| `parse-bench customer` | Guided evaluation on your own documents (`init`, `ingest`, `groundtruth`, `run`, `report`, `status`, `keys`) |
-
-Advanced subcommands: `inference`, `evaluation`, `analysis`, `pipeline`, `data`
-
-<details>
-<summary><strong>Output Structure</strong></summary>
-
-```
-output/
-├── _leaderboard.html                       # Cross-pipeline leaderboard
-└── <pipeline_name>/
-    ├── chart/
-    │   ├── *.result.json                    # Inference results
-    │   ├── _evaluation_report.json          # Evaluation summary
-    │   ├── _evaluation_report_detailed.html # Interactive detailed report
-    │   ├── _evaluation_results.csv          # Per-example CSV
-    │   └── _evaluation_report.md            # Markdown summary
-    ├── layout/   (same structure)
-    ├── table/    (same structure)
-    ├── text_content/   (same structure)
-    ├── text_formatting/ (same structure)
-    ├── _evaluation_report_dashboard.html    # Aggregation dashboard
-    └── _metadata.json                       # Run metadata
-```
-
-</details>
-
-<details>
-<summary><strong>Project Structure</strong></summary>
-
-```
-src/parse_bench/
-├── cli.py                           # Fire CLI entry point
-├── pipeline/cli.py                  # End-to-end pipeline orchestration
-├── data/
-│   ├── download.py                  # HuggingFace dataset download
-│   └── cli.py                       # Data management CLI
-├── inference/
-│   ├── runner.py                    # Batch inference with concurrency
-│   ├── pipelines/                   # Pipeline registry (parse, extract, layout)
-│   └── providers/                   # Provider implementations per product type
-├── evaluation/
-│   ├── runner.py                    # Parallel evaluation
-│   ├── evaluators/                  # Product-specific evaluators (parse, extract, layout)
-│   ├── metrics/                     # Metric implementations (TEDS, GriTS, rules, IoU)
-│   └── reports/                     # CSV, HTML, markdown export
-├── customer/                        # Guided evaluation on your own documents
-│   ├── cli.py                       # init / ingest / groundtruth / run / report
-│   ├── project.py                   # Project layout, config, API-key discovery
-│   ├── groundtruth/                 # Page transcription -> derived rules
-│   └── comparison/                  # Paired statistics + customer report
-├── analysis/
-│   ├── aggregation_report.py        # Multi-category dashboard
-│   ├── detailed_report.py           # Interactive per-category HTML report
-│   ├── comparison.py                # Pipeline comparison
-│   └── comparison_report.py         # Comparison HTML report
-├── test_cases/
-│   ├── loader.py                    # Load test cases (JSONL or sidecar .test.json)
-│   └── schema.py                    # TestCase types (Parse, Extract, LayoutDetection)
-└── schemas/
-    ├── pipeline_io.py               # InferenceRequest, InferenceResult
-    ├── evaluation.py                # EvaluationResult, EvaluationSummary
-    └── product.py                   # ProductType enum (PARSE, EXTRACT, LAYOUT_DETECTION)
-```
-
-</details>
+A tool is eligible for the public leaderboard if it is publicly accessible
+(open weights or a self-serve API), finishes a run in single-digit hours, and
+needs no custom framework changes — so the comparison stays fair. Concurrency
+is tuned to each provider's recommended settings.
+
+Public scores are a useful prior, not a substitute for measuring on your own
+documents: the ranking on enterprise insurance filings is not necessarily the
+ranking on your engineering drawings.
 
 ## Citation
 
