@@ -226,8 +226,12 @@ The report gives a paired statistical comparison — per-document differences,
 bootstrap confidence intervals, Holm-corrected Wilcoxon p-values, and win/loss
 counts — rather than a side-by-side eyeball of a few files.
 
-See [docs/customer_eval.md](docs/customer_eval.md) for the full walkthrough,
-including ground-truth provenance, cost, and how to bring your own labels.
+- [`src/parse_bench/customer/README.md`](src/parse_bench/customer/README.md) — how
+  the workflow is built: architecture, why ground truth is derived rather than
+  authored, the statistics, and a reproducible worked example.
+- [`docs/customer_eval.md`](docs/customer_eval.md) — walkthrough for running an
+  evaluation with someone: ground-truth provenance, cost, bringing your own
+  labels, and objection handling.
 
 <details>
 <summary><strong>Evaluating Your Own Tool</strong></summary>

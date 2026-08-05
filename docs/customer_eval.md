@@ -10,6 +10,10 @@ cannot be won, because it defines the competitor as correct by construction.
 Handing the prospect a real harness replaces an unwinnable argument with a
 measurable one.
 
+For how the workflow is built — architecture, why ground truth is derived
+rather than authored, and the statistics — see
+[`src/parse_bench/customer/README.md`](../src/parse_bench/customer/README.md).
+
 ## What the customer runs
 
 Five commands, start to finish:
