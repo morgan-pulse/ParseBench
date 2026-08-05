@@ -193,3 +193,71 @@ class TestPairing:
         assert test_ids == ["table/a", "table/b"]
         assert left == [0.8, 0.2]
         assert right == [0.9, 0.1]
+
+
+class TestSingleDimensionLayout:
+    """A one-dimension dataset writes its report at the pipeline root.
+
+    ``parse-bench run`` only creates per-category subdirectories when it
+    discovers more than one group. A customer who cares about a single
+    dimension therefore produces output the subdirectory scan cannot see, and
+    used to get an empty report after a run that reported success.
+    """
+
+    def _write_root_report(self, paths: ProjectPaths, pipeline: str, scores: dict[str, float]) -> None:
+        results = [
+            {
+                "test_id": test_id,
+                "example_id": test_id,
+                "pipeline_name": pipeline,
+                "product_type": "parse",
+                "success": True,
+                "metrics": [{"metric_name": "rule_pass_rate", "value": value}],
+            }
+            for test_id, value in scores.items()
+        ]
+        pipeline_dir = paths.pipeline_output_dir(pipeline)
+        pipeline_dir.mkdir(parents=True, exist_ok=True)
+        (pipeline_dir / "_evaluation_report.json").write_text(
+            json.dumps(
+                {
+                    "total_examples": len(results),
+                    "successful": len(results),
+                    "failed": 0,
+                    "skipped": 0,
+                    "aggregate_metrics": {},
+                    "per_example_results": results,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_root_level_report_is_found(self, tmp_path: Path) -> None:
+        paths = ProjectPaths(tmp_path)
+        self._write_root_report(paths, "a", {"energy/doc1": 0.4, "energy/doc2": 0.6})
+        self._write_root_report(paths, "b", {"energy/doc1": 0.1, "energy/doc2": 0.2})
+
+        scores = load_scores(paths, ["a", "b"])
+        assert set(scores) == {"energy"}
+        assert scores["energy"].by_pipeline["a"]["energy/doc1"] == 0.4
+
+    def test_category_is_taken_from_the_test_id_prefix(self, tmp_path: Path) -> None:
+        paths = ProjectPaths(tmp_path)
+        self._write_root_report(paths, "a", {"invoices/doc1": 0.5})
+        assert set(load_scores(paths, ["a"])) == {"invoices"}
+
+    def test_subdirectory_reports_still_win(self, tmp_path: Path) -> None:
+        # When both layouts are present the per-category reports are the real
+        # ones; the root report is their aggregate and would double-count.
+        paths = ProjectPaths(tmp_path)
+        _write_report(paths, "a", "table", {"table/x": {"rule_pass_rate": 0.9}})
+        self._write_root_report(paths, "a", {"table/x": 0.5})
+
+        scores = load_scores(paths, ["a"])
+        assert set(scores) == {"table"}
+        assert scores["table"].by_pipeline["a"]["table/x"] == 0.9
+
+    def test_category_filter_still_applies(self, tmp_path: Path) -> None:
+        paths = ProjectPaths(tmp_path)
+        self._write_root_report(paths, "a", {"energy/doc1": 0.4})
+        assert load_scores(paths, ["a"], categories=["table"]) == {}

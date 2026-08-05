@@ -369,13 +369,30 @@ def render_env_template(pipelines: list[str], groundtruth: GroundTruthConfig) ->
         f"{groundtruth.api_key_env}=",
         "",
     ]
+    # Pipelines from the same vendor share credentials. Emitting a variable
+    # twice reads as "set this twice" and invites a customer to paste two
+    # different keys into the same name, where the last one silently wins.
+    emitted: set[str] = set()
     for pipeline in pipelines:
         variables = required_env_vars(pipeline)
-        lines.append(f"# {pipeline}")
+        new_variables = [v for v in variables if v not in emitted]
+
         if not variables:
+            lines.append(f"# {pipeline}")
             lines.append(f"# (no credentials detected for {pipeline})")
-        for var in variables:
+            lines.append("")
+            continue
+
+        if not new_variables:
+            shared = ", ".join(variables)
+            lines.append(f"# {pipeline} — uses {shared} above")
+            lines.append("")
+            continue
+
+        lines.append(f"# {pipeline}")
+        for var in new_variables:
             suffix = "  # optional" if _is_optional_env_var(var) else ""
             lines.append(f"{var}={suffix}")
+            emitted.add(var)
         lines.append("")
     return "\n".join(lines)

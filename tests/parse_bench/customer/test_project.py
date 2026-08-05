@@ -123,3 +123,26 @@ class TestEnvTemplate:
         template = render_env_template(["llamaparse_agentic"], config.groundtruth)
         base_url_line = next(line for line in template.splitlines() if line.startswith("LLAMA_CLOUD_BASE_URL"))
         assert "optional" in base_url_line
+
+
+class TestEnvTemplateDeduplication:
+    def test_shared_vendor_key_is_emitted_once(self) -> None:
+        # Two LlamaParse pipelines read the same key. Emitting it twice reads
+        # as "set this twice" and invites two different values under one name,
+        # where the last assignment silently wins.
+        config = new_config("Acme", ["llamaparse_agentic", "llamaparse_cost_effective"])
+        template = render_env_template(["llamaparse_agentic", "llamaparse_cost_effective"], config.groundtruth)
+        assignments = [line for line in template.splitlines() if line.startswith("LLAMA_CLOUD_API_KEY=")]
+        assert len(assignments) == 1
+
+    def test_the_sharing_pipeline_is_still_listed(self) -> None:
+        config = new_config("Acme", ["llamaparse_agentic", "llamaparse_cost_effective"])
+        template = render_env_template(["llamaparse_agentic", "llamaparse_cost_effective"], config.groundtruth)
+        # The customer must still see that the second pipeline is covered.
+        assert "llamaparse_cost_effective" in template
+
+    def test_distinct_vendors_each_get_their_key(self) -> None:
+        config = new_config("Acme", ["reducto", "extend_parse"])
+        template = render_env_template(["reducto", "extend_parse"], config.groundtruth)
+        assert "REDUCTO_API_KEY=" in template
+        assert "EXTEND_API_KEY=" in template

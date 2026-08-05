@@ -182,4 +182,33 @@ def dataset_summary(paths: ProjectPaths) -> dict[str, dict[str, int]]:
             "documents": len(documents),
             "verified": verified,
         }
+
+    summary.update(_sidecar_summary(paths))
+    return summary
+
+
+def _sidecar_summary(paths: ProjectPaths) -> dict[str, dict[str, int]]:
+    """Count ground truth supplied as sidecar ``.test.json`` files.
+
+    Customer-supplied labels often arrive in this layout rather than JSONL.
+    Reporting them as absent would tell the customer to regenerate ground
+    truth they already have — and pay for it.
+    """
+    summary: dict[str, dict[str, int]] = {}
+    for test_path in sorted(paths.data_dir.rglob("*.test.json")):
+        # Sidecar group is the containing directory, matching the loader.
+        category = test_path.parent.name
+        try:
+            config = json.loads(test_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rules = config.get("test_rules") or []
+        if not isinstance(rules, list):
+            continue
+        entry = summary.setdefault(category, {"rules": 0, "documents": 0, "verified": 0})
+        entry["rules"] += len(rules)
+        entry["documents"] += 1
+        # Sidecar datasets are hand-built, so their rules count as verified
+        # unless a rule explicitly says otherwise.
+        entry["verified"] += sum(1 for r in rules if isinstance(r, dict) and r.get("verified", True))
     return summary

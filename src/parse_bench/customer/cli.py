@@ -45,6 +45,21 @@ def _load(path: str | Path) -> tuple[Any, ProjectPaths]:
     return config, paths
 
 
+def has_ground_truth(paths: ProjectPaths) -> bool:
+    """Whether the project has ground truth the loader can read.
+
+    Both dataset formats count. Customers bringing their own labels often
+    already have them as sidecar ``.test.json`` files next to the PDFs, and
+    the stock loader reads that layout — requiring JSONL would reject valid
+    ground truth for no reason.
+    """
+    if not paths.data_dir.exists():
+        return False
+    if any(paths.data_dir.glob("*.jsonl")):
+        return True
+    return any(paths.data_dir.rglob("*.test.json"))
+
+
 def _as_list(value: str | tuple[str, ...] | list[str] | None) -> list[str]:
     """Normalize Fire's flexible list arguments into a list of strings."""
     if value is None:
@@ -374,9 +389,10 @@ class CustomerCLI:
             print("No pipelines configured.", file=sys.stderr)
             return 1
 
-        if not list(paths.data_dir.glob("*.jsonl")):
+        if not has_ground_truth(paths):
             print(
-                f"No ground truth found in {paths.data_dir}. Run: parse-bench customer groundtruth {paths.root}",
+                f"No ground truth found in {paths.data_dir}. Run: parse-bench customer groundtruth {paths.root}, "
+                f"or supply your own (JSONL or sidecar .test.json — see docs/customer_eval.md).",
                 file=sys.stderr,
             )
             return 1
@@ -452,7 +468,9 @@ class CustomerCLI:
                 marker = " *" if summary["pipeline"] == data["baseline"] else "  "
                 print(f" {marker} {summary['pipeline']:<40} {summary['mean'] * 100:6.1f}  (n={summary['n']})")
             for row in category["comparisons"]:
-                print(f"      vs baseline — {category['verdicts'][row['challenger']]}")
+                # Name the challenger: with several of them, an unattributed
+                # verdict line is ambiguous about who it is describing.
+                print(f"      {row['challenger']} vs baseline — {category['verdicts'][row['challenger']]}")
 
         print(f"\nHTML:     {written['html']}")
         print(f"Markdown: {written['markdown']}")
@@ -489,7 +507,14 @@ class CustomerCLI:
                 pages = sum(d.pages or 1 for d in group_docs)
                 print(f"  {group:<8} {len(group_docs):>4} staged, {pages:>5} page(s)")
         else:
-            print(f"  none staged — put documents in {paths.docs_dir} and run `customer ingest`")
+            # A bring-your-own-ground-truth project keeps its documents in
+            # data/ alongside their labels and never runs ingest. Reporting
+            # "none" there would look like the project is empty.
+            supplied = sorted(paths.data_dir.rglob("*.pdf")) if paths.data_dir.exists() else []
+            if supplied:
+                print(f"  {len(supplied):>4} supplied with your own ground truth (not staged via ingest)")
+            else:
+                print(f"  none staged — put documents in {paths.docs_dir} and run `customer ingest`")
         truncated = manifest.get("truncated") or []
         if truncated:
             print(f"  {len(truncated)} document(s) truncated to fit max_pages_per_doc")
@@ -507,17 +532,12 @@ class CustomerCLI:
             print("  none — run `customer groundtruth`")
 
         print("\nEvaluation results")
-        any_results = False
+        scored = load_scores(paths, config.pipelines)
+        any_results = bool(scored)
         for pipeline in config.pipelines:
-            pipeline_dir = paths.pipeline_output_dir(pipeline)
-            categories = (
-                sorted(
-                    d.name for d in pipeline_dir.iterdir() if d.is_dir() and (d / "_evaluation_report.json").exists()
-                )
-                if pipeline_dir.exists()
-                else []
-            )
-            any_results = any_results or bool(categories)
+            # Read the same way the report does, so status can never claim a
+            # pipeline has run when the report would find nothing for it.
+            categories = sorted(name for name, entry in scored.items() if pipeline in entry.by_pipeline)
             state = ", ".join(categories) if categories else "not run"
             print(f"  {pipeline:<40} {state}")
 
@@ -525,14 +545,17 @@ class CustomerCLI:
         self._print_env_status(config)
 
         print("\nNext step:")
-        if not docs:
-            print(f"  parse-bench customer ingest {paths.root}")
-        elif not summary:
-            print(f"  parse-bench customer groundtruth {paths.root}")
-        elif not any_results:
-            print(f"  parse-bench customer run {paths.root}")
-        else:
+        # Ordered by how far along the project is, furthest first. Ground truth
+        # is checked before staged documents because a project that brought its
+        # own labels keeps them in data/ and never runs ingest at all.
+        if any_results:
             print(f"  parse-bench customer report {paths.root}")
+        elif summary:
+            print(f"  parse-bench customer run {paths.root}")
+        elif not docs:
+            print(f"  parse-bench customer ingest {paths.root}")
+        else:
+            print(f"  parse-bench customer groundtruth {paths.root}")
         return 0
 
     def keys(self, path: str | Path) -> int:

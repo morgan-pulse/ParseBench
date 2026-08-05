@@ -7,6 +7,7 @@ pipeline's score on each individual document, keyed by test id.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,24 @@ class CategoryScores:
         a = self.by_pipeline[pipeline_a]
         b = self.by_pipeline[pipeline_b]
         return [a[t] for t in test_ids], [b[t] for t in test_ids], test_ids
+
+
+def _infer_category(summary: EvaluationSummary, pipeline_dir: Path) -> str:
+    """Name the dimension behind a pipeline-root evaluation report.
+
+    Test ids are ``<group>/<document>``, so the group prefix is the dimension.
+    Falls back to the inference output subdirectory, then to a generic label.
+    """
+    prefixes = Counter(
+        result.test_id.split("/", 1)[0] for result in summary.per_example_results if "/" in result.test_id
+    )
+    if prefixes:
+        return prefixes.most_common(1)[0][0]
+
+    subdirs = [d.name for d in pipeline_dir.iterdir() if d.is_dir() and not d.name.startswith("_")]
+    if len(subdirs) == 1:
+        return subdirs[0]
+    return "overall"
 
 
 def _load_summary(path: Path) -> EvaluationSummary | None:
@@ -86,15 +105,30 @@ def load_scores(
         pipeline_dir = paths.pipeline_output_dir(pipeline)
         if not pipeline_dir.exists():
             continue
+
+        found_in_subdir = False
         for category_dir in sorted(pipeline_dir.iterdir()):
             if not category_dir.is_dir():
                 continue
             category = category_dir.name
+            summary = _load_summary(category_dir / "_evaluation_report.json")
+            if summary is None:
+                continue
+            found_in_subdir = True
             if categories is not None and category not in categories:
                 continue
-            summary = _load_summary(category_dir / "_evaluation_report.json")
+            summaries.setdefault(category, {})[pipeline] = summary
+
+        # A dataset with a single dimension is evaluated in one pass and its
+        # report lands at the pipeline root rather than in a category subdir.
+        # Without this, a customer who only cares about one dimension gets an
+        # empty report after a run that reported success.
+        if not found_in_subdir:
+            summary = _load_summary(pipeline_dir / "_evaluation_report.json")
             if summary is not None:
-                summaries.setdefault(category, {})[pipeline] = summary
+                category = _infer_category(summary, pipeline_dir)
+                if categories is None or category in categories:
+                    summaries.setdefault(category, {})[pipeline] = summary
 
     # Pass 2: pick one metric per category, then pull per-document scores.
     discovered: dict[str, CategoryScores] = {}

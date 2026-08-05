@@ -198,3 +198,61 @@ class TestDatasetSummary:
         assert summary["documents"] == 2
         assert summary["rules"] > 0
         assert summary["verified"] == 0
+
+
+class TestSidecarGroundTruth:
+    """Customer-supplied labels often arrive as sidecar .test.json files.
+
+    The stock loader reads that layout, so the customer workflow must
+    recognise it too — otherwise it tells a customer to regenerate (and pay
+    for) ground truth they already have.
+    """
+
+    def _sidecar(self, paths: ProjectPaths, group: str, stem: str, rules: int) -> None:
+        group_dir = paths.data_dir / group
+        group_dir.mkdir(parents=True, exist_ok=True)
+        (group_dir / f"{stem}.pdf").write_bytes(b"%PDF-1.4\n")
+        (group_dir / f"{stem}.test.json").write_text(
+            json.dumps({"test_rules": [{"type": "present", "text": f"line {i}"} for i in range(rules)]}),
+            encoding="utf-8",
+        )
+
+    def test_summary_counts_sidecar_rules(self, tmp_path: Path) -> None:
+        paths = ProjectPaths(tmp_path)
+        paths.ensure_dirs()
+        self._sidecar(paths, "energy", "report_a", 5)
+        self._sidecar(paths, "energy", "report_b", 3)
+
+        summary = dataset_summary(paths)["energy"]
+        assert summary["documents"] == 2
+        assert summary["rules"] == 8
+        # Hand-built labels count as verified; the report must not describe a
+        # customer's own ground truth as 0% verified.
+        assert summary["verified"] == 8
+
+    def test_run_accepts_sidecar_ground_truth(self, tmp_path: Path) -> None:
+        from parse_bench.customer.cli import has_ground_truth
+
+        paths = ProjectPaths(tmp_path)
+        paths.ensure_dirs()
+        assert not has_ground_truth(paths)
+
+        self._sidecar(paths, "energy", "report_a", 2)
+        assert has_ground_truth(paths)
+
+    def test_run_accepts_generated_jsonl(self, tmp_path: Path) -> None:
+        from parse_bench.customer.cli import has_ground_truth
+
+        paths = _project(tmp_path, {"text": ["claim_01"]})
+        assert not has_ground_truth(paths)
+        write_dataset(paths, [_document("text", "claim_01", ["text_content"])])
+        assert has_ground_truth(paths)
+
+    def test_sidecar_dataset_loads_through_the_stock_loader(self, tmp_path: Path) -> None:
+        paths = ProjectPaths(tmp_path)
+        paths.ensure_dirs()
+        self._sidecar(paths, "energy", "report_a", 4)
+
+        cases = load_test_cases(paths.data_dir, product_type=ProductType.PARSE.value)
+        assert [c.group for c in cases] == ["energy"]
+        assert len(cases[0].test_rules) == 4
