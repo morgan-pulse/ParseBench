@@ -332,3 +332,6 @@ src/parse_bench/
 - **Paper**: [arXiv:2604.08538](https://arxiv.org/abs/2604.08538)
 - **HuggingFace Dataset**: [llamaindex/ParseBench](https://huggingface.co/datasets/llamaindex/ParseBench)
 - **Code**: [run-llama/ParseBench](https://github.com/run-llama/ParseBench)
+- **ExtractBench**: [run-llama/ExtractBench](https://github.com/run-llama/ExtractBench) - A Benchmark for Schema-Guided Enterprise Document Extraction
+
+
