@@ -6,6 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PROVIDER_MODULES = [
+    "amazon_nova",
     "anthropic",
     "azure_document_intelligence",
     "chandra2",
