@@ -278,6 +278,118 @@ def split_pdf_to_pages(pdf_path: str) -> list[tuple[bytes, int, int]]:
     return results
 
 
+_WRAPPER_TAG_RE = re.compile(r"<(/?)(\w+)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+_BBOX_ATTR_RE = re.compile(r"data-bbox=[\"'](\[[^\]]+\])[\"']", re.IGNORECASE)
+_LABEL_ATTR_RE = re.compile(r"data-label=[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+
+def extract_layout_blocks_lenient(content: str) -> list[dict[str, Any]]:
+    """Parse layout elements tolerating wrapper tags other than ``<div>``.
+
+    ``parse_layout_blocks`` implements the contract the prompt asks for: a flat
+    list of ``<div data-bbox=... data-label=...>`` elements, each closed. Some
+    models answer with the same two attributes on a different tag and leave it
+    unclosed — Amazon Nova 2 emits ``<TABLE data-bbox=...>`` around a real
+    ``<table>`` with no ``</TABLE>`` at all, and wraps the page in an outer
+    ``<div data-bbox=...>``. Those are formatting differences, not missing
+    information: bbox, label and content are all present, so the element should
+    be scored on what it says rather than on which tag carried it.
+
+    An element runs from its opening tag until the first of: its own closing tag
+    (depth-aware over same-named tags, so an inner ``</table>`` does not end a
+    ``<TABLE>`` wrapper), the next element's opening tag, or end of content.
+    Taking the earliest of the three means an unclosed wrapper simply ends where
+    its sibling begins, which is how Nova's contiguous bands read anyway, and no
+    text can be dropped or attributed to two elements.
+
+    Elements whose span holds only whitespace are containers (a page-level
+    wrapper around the real elements) and are skipped.
+    """
+    tags = list(_WRAPPER_TAG_RE.finditer(content))
+    opens = [t for t in tags if not t.group(1)]
+    wrappers = [t for t in opens if "data-bbox=" in t.group(3).lower()]
+    if not wrappers:
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    for position, wrapper in enumerate(wrappers):
+        bbox_match = _BBOX_ATTR_RE.search(wrapper.group(3))
+        label_match = _LABEL_ATTR_RE.search(wrapper.group(3))
+        if not bbox_match:
+            continue
+        try:
+            bbox = json.loads(bbox_match.group(1))
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse bbox: {bbox_match.group(1)}")
+            continue
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+
+        name = wrapper.group(2).lower()
+        end = len(content)
+        depth = 0
+        for tag in tags:
+            if tag.start() < wrapper.end():
+                continue
+            if tag.group(2).lower() != name:
+                continue
+            if tag.group(1):
+                if depth == 0:
+                    end = tag.start()
+                    break
+                depth -= 1
+            else:
+                depth += 1
+        if position + 1 < len(wrappers):
+            end = min(end, wrappers[position + 1].start())
+
+        text = content[wrapper.end() : end].strip()
+        if not text:
+            continue
+        blocks.append({"bbox": bbox, "label": label_match.group(1) if label_match else "Text", "text": text})
+
+    return blocks
+
+
+def close_open_ended_bands(items: list[dict[str, Any]], page_extent: float = 1000.0) -> list[dict[str, Any]]:
+    """Give an element a bottom edge when the model pinned it to the page bottom.
+
+    Amazon Nova 2 frequently emits ``[0, y1, 1000, 1000]`` for every element: the
+    left edge, right edge and top are real, but the bottom is left at the page
+    bottom, so each box swallows the whole page below it. A box like that fails
+    localisation (``IoA(pred, gt)`` collapses) even though its ``y1`` is correct,
+    which scores the model at zero for an output that does carry position.
+
+    The model states its own convention whenever it fills the field in: the boxes
+    come back as contiguous full-width bands, ``[0, 301, 1000, 456]`` followed by
+    ``[0, 456, 1000, 480]`` — one band's bottom is the next band's top. This
+    applies exactly that reading, so an open-ended band ends where its successor
+    begins. A full-width band with a correct vertical extent localises fine
+    (``IoA(pred, gt)`` is the ground-truth box's width fraction, comfortably over
+    the 0.20 floor), so this recovers real credit rather than manufacturing it.
+
+    Only boxes whose bottom sits at the page extent are touched, and only when a
+    later element starts strictly lower. Boxes with a real bottom edge, the final
+    element, and degenerate output where every element shares one top edge are all
+    left exactly as they are.
+    """
+    for index, item in enumerate(items):
+        bbox = item.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        y1, y2 = bbox[1], bbox[3]
+        if y2 < page_extent:
+            continue
+        for following in items[index + 1 :]:
+            next_bbox = following.get("bbox")
+            if not isinstance(next_bbox, list) or len(next_bbox) != 4:
+                continue
+            if next_bbox[1] > y1:
+                bbox[3] = next_bbox[1]
+                break
+    return items
+
+
 def parse_layout_blocks(content: str) -> list[dict[str, Any]]:
     """Parse <div data-bbox="..." data-label="...">content</div> blocks.
 

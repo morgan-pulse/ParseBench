@@ -1520,6 +1520,24 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
         )
     )
 
+    # Amazon Nova 2 Lite - Parse with Layout (Bedrock Converse, US geo profile)
+    # Nova 2 Lite has no in-region endpoint in us-east-1, so it is addressed through the
+    #  cross-Region inference profile. Extended thinking is left at its Bedrock
+    # default (disabled) — page transcription does not need it and reasoning tokens bill
+    # at the output rate.
+    register_fn(
+        PipelineSpec(
+            pipeline_name="amazon_nova_2_lite_parse_with_layout",
+            provider_name="amazon_nova",
+            product_type=ProductType.PARSE,
+            config={
+                "model": "us.amazon.nova-2-lite-v1:0",
+                "dpi": 150,
+                "max_tokens": 32768,
+            },
+        )
+    )
+
     # Gemini 3.1 Flash Lite - Parse with Layout
     register_fn(
         PipelineSpec(
