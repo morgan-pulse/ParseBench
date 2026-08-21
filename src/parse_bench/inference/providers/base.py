@@ -42,6 +42,15 @@ class ProviderPermanentError(ProviderError):
     """
 
 
+class ProviderRetryExhaustedError(ProviderPermanentError):
+    """Terminal failure after a provider-owned retry budget is exhausted.
+
+    Providers that retry at a finer-grained boundary raise this error so the
+    document runner does not start a second retry cycle and replay completed
+    work.
+    """
+
+
 class Provider(ABC):
     """Abstract base class for document parsing providers."""
 

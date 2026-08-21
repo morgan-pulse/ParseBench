@@ -24,6 +24,7 @@ from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
     ProviderPermanentError,
+    ProviderRetryExhaustedError,
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
@@ -288,6 +289,26 @@ class DotsOcrParseProvider(Provider):
     # Per-page inference
     # ------------------------------------------------------------------
 
+    def _call_page_with_retries(self, image: Image.Image, page_number: int) -> str:
+        """Own transient retries at the billable page request boundary."""
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                return self._call_endpoint(image)
+            except ProviderTransientError as exc:
+                if attempt == max_attempts - 1:
+                    raise ProviderRetryExhaustedError(
+                        f"dots.ocr page {page_number} failed after {max_attempts} attempts: {exc}"
+                    ) from exc
+                delay = 15 * (2**attempt)
+                print(
+                    f"[dots.ocr] Transient error on page {page_number}: {exc}. "
+                    f"Retrying in {delay}s (attempt {attempt + 1}/{max_attempts})..."
+                )
+                time.sleep(delay)
+
+        raise AssertionError("unreachable")
+
     def _run_inference_pages(self, source_path: Path) -> dict[str, Any]:
         """Convert source file to images and run inference on each page."""
         pages = []
@@ -295,7 +316,7 @@ class DotsOcrParseProvider(Provider):
             for page_index, image in enumerate(images):
                 page_image = image if image.mode in ("RGB", "RGBA") else image.convert("RGB")
                 try:
-                    raw_text = self._call_endpoint(page_image)
+                    raw_text = self._call_page_with_retries(page_image, page_index + 1)
 
                     page_data: dict[str, Any] = {
                         "page_index": page_index,
@@ -306,10 +327,7 @@ class DotsOcrParseProvider(Provider):
 
                     if self._is_layout_mode:
                         # Parse structured JSON → typed layout items + reassemble markdown
-                        try:
-                            layout_items = self._parse_layout_items(raw_text)
-                        except ProviderPermanentError:
-                            layout_items = []
+                        layout_items = self._parse_layout_items(raw_text)
 
                         page_data["layout_items"] = [item.model_dump() for item in layout_items]
                         page_data["markdown"] = _reassemble_markdown(layout_items)
@@ -357,51 +375,25 @@ class DotsOcrParseProvider(Provider):
             )
 
         started_at = datetime.now()
-        max_retries = 3
-        last_error: Exception | None = None
+        try:
+            raw_output = self._run_inference_pages(source_path)
+        except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
+            raise
+        except Exception as exc:
+            raise ProviderPermanentError(f"Unexpected error during inference: {exc}") from exc
 
-        for attempt in range(max_retries):
-            try:
-                raw_output = self._run_inference_pages(source_path)
-
-                completed_at = datetime.now()
-                latency_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-                return RawInferenceResult(
-                    request=request,
-                    pipeline=pipeline,
-                    pipeline_name=pipeline.pipeline_name,
-                    product_type=request.product_type,
-                    raw_output=raw_output,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    latency_in_ms=latency_ms,
-                )
-
-            except ProviderTransientError as e:
-                last_error = e
-                if attempt < max_retries - 1:
-                    delay = 15 * (2**attempt)
-                    print(
-                        f"[dots.ocr] Transient error on {request.example_id}: {e}. "
-                        f"Retrying in {delay}s (attempt {attempt + 1}/{max_retries})..."
-                    )
-                    time.sleep(delay)
-                    continue
-
-            except (ProviderPermanentError, ProviderConfigError) as e:
-                last_error = e
-                break
-
-            except Exception as e:
-                last_error = e
-                break
-
-        if isinstance(last_error, (ProviderPermanentError, ProviderTransientError, ProviderConfigError)):
-            raise last_error
-        if last_error is not None:
-            raise ProviderPermanentError(f"Unexpected error during inference: {last_error}") from last_error
-        raise ProviderPermanentError("Inference failed without an error")
+        completed_at = datetime.now()
+        latency_ms = int((completed_at - started_at).total_seconds() * 1000)
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output=raw_output,
+            started_at=started_at,
+            completed_at=completed_at,
+            latency_in_ms=latency_ms,
+        )
 
     # ------------------------------------------------------------------
     # normalize

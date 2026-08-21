@@ -295,7 +295,7 @@ def test_refactored_provider_propagates_transient_page_failure_for_document_retr
             image.getpixel((0, 0))
 
 
-def test_dots_ocr_retries_the_document_after_transient_page_failure(
+def test_dots_ocr_retries_only_the_failed_page_after_transient_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "document.pdf"
@@ -317,12 +317,13 @@ def test_dots_ocr_retries_the_document_after_transient_page_failure(
     raw_result = provider.run_inference(_pipeline("dots_ocr"), _request(source))
     result = provider.normalize(raw_result)
 
-    assert page_widths == [9, 10, 9, 10]
+    assert page_widths == [9, 10, 10]
     assert delays == [15]
     assert result.output.markdown == "page 1\n\npage 2"
+    assert [page.page_index for page in result.output.pages] == [0, 1]
 
 
-def test_dots_ocr_propagates_transient_failure_after_document_retries_exhausted(
+def test_dots_ocr_raises_terminal_error_after_page_retries_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "document.pdf"
@@ -339,8 +340,23 @@ def test_dots_ocr_propagates_transient_failure_after_document_retries_exhausted(
     delays: list[int] = []
     monkeypatch.setattr("time.sleep", delays.append)
 
-    with pytest.raises(ProviderTransientError, match="retry me"):
+    from parse_bench.inference.providers.base import ProviderRetryExhaustedError
+
+    with pytest.raises(ProviderRetryExhaustedError, match="page 1 failed after 3 attempts: retry me"):
         provider.run_inference(_pipeline("dots_ocr"), _request(source))
 
     assert page_widths == [9, 9, 9]
     assert delays == [15, 30]
+
+
+def test_dots_ocr_malformed_layout_aborts_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    _mock_pdf(source, monkeypatch)
+    provider = _provider("dots_ocr", "DotsOcrParseProvider", 144)
+    provider._prompt_mode = "prompt_layout_all_en_v1_5"
+    provider._is_layout_mode = True
+    provider._call_endpoint = lambda image: "not layout json"
+
+    with pytest.raises(ProviderPermanentError, match="Could not parse layout items"):
+        provider.run_inference(_pipeline("dots_ocr"), _request(source))
