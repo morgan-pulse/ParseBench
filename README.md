@@ -233,7 +233,7 @@ ANTHROPIC_API_KEY=...
 GOOGLE_API_KEY=...
 ```
 
-ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic and rule-based. API keys are only used to call the parsing tool being evaluated. (An opt-in chart normalization mode exists but is off by default — see [`LLAMACLOUD_BENCH_LLM_NORMALIZATION`](#environment-variables).)
+By default ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic and rule-based, and API keys are only used to call the parsing tool being evaluated. (An opt-in chart normalization mode exists but is off by default — see [`LLAMACLOUD_BENCH_LLM_NORMALIZATION`](#environment-variables).)
 
 ### Environment Variables
 
