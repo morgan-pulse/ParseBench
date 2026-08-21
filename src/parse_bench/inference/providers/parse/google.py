@@ -511,9 +511,13 @@ class GoogleProvider(Provider):
 
             if text is None:
                 reason2 = self._failure_reason(response)
-                return f"[No output after 2 attempts: 1st={reason1}, 2nd={reason2}]", usage
+                raise ProviderTransientError(
+                    f"Gemini API returned no text after 2 attempts: 1st={reason1}, 2nd={reason2}"
+                )
             return text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -572,11 +576,15 @@ class GoogleProvider(Provider):
 
             if text is None:
                 reason2 = self._failure_reason(response)
-                return [], f"[No output after 2 attempts: 1st={reason1}, 2nd={reason2}]", usage
+                raise ProviderTransientError(
+                    f"Gemini API returned no layout text after 2 attempts: 1st={reason1}, 2nd={reason2}"
+                )
 
             items = swap_gemini_bbox(parse_layout_blocks(text))
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -645,9 +653,13 @@ class GoogleProvider(Provider):
 
             if text is None:
                 reason2 = self._failure_reason(response)
-                return f"[No output after 2 attempts: 1st={reason1}, 2nd={reason2}]", usage
+                raise ProviderTransientError(
+                    f"Gemini API returned no PDF text after 2 attempts: 1st={reason1}, 2nd={reason2}"
+                )
             return text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -705,11 +717,15 @@ class GoogleProvider(Provider):
 
             if text is None:
                 reason2 = self._failure_reason(response)
-                text = f"[No output after 2 attempts: 1st={reason1}, 2nd={reason2}]"
+                raise ProviderTransientError(
+                    f"Gemini API returned no PDF layout text after 2 attempts: 1st={reason1}, 2nd={reason2}"
+                )
 
             items = swap_gemini_bbox(parse_layout_blocks(text))
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
