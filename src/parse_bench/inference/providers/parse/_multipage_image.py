@@ -15,6 +15,7 @@ import math
 import tempfile
 from collections.abc import Callable, Generator, Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,46 @@ from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, R
 from parse_bench.schemas.product import ProductType
 
 _MULTIPAGE_KEY = "_parse_bench_multipage"
+
+
+@dataclass(frozen=True)
+class ImageBackedPdfProviderSpec:
+    """Registered parse provider whose PDF path rasterizes pages locally."""
+
+    provider_name: str
+    module_name: str
+    class_name: str
+    dpi: int
+    execution: str
+
+
+# Authoritative inventory for local PDF-to-image parse providers. Tests derive
+# their provider matrices from this manifest and verify it against registered
+# provider decorators plus the page-rendering calls in provider source.
+IMAGE_BACKED_PDF_PROVIDERS = (
+    ImageBackedPdfProviderSpec("amazon_nova", "amazon_nova", "AmazonNovaProvider", 150, "direct"),
+    ImageBackedPdfProviderSpec("anthropic", "anthropic", "AnthropicProvider", 144, "direct"),
+    ImageBackedPdfProviderSpec("chandra2", "chandra2", "Chandra2Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("deepseekocr2", "deepseekocr2", "DeepSeekOCR2Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("dots_ocr_parse", "dots_ocr", "DotsOcrParseProvider", 144, "direct"),
+    ImageBackedPdfProviderSpec("falconocr", "falconocr", "FalconOcrProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("gemma4", "gemma4", "Gemma4Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("google", "google", "GoogleProvider", 144, "direct"),
+    ImageBackedPdfProviderSpec("granite_vision", "granite_vision", "GraniteVisionProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("infinity_parser2", "infinity_parser2", "InfinityParser2Provider", 300, "adapter"),
+    ImageBackedPdfProviderSpec("kdl_frontier_nano", "kdl_frontier_nano", "KdlFrontierNanoProvider", 144, "kdl"),
+    ImageBackedPdfProviderSpec("mineru25", "mineru25", "MinerU25Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("mineru2605pro", "mineru2605pro", "MinerU2605ProProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("mineru_diffusion", "mineru_diffusion", "MinerUDiffusionProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("nemotron_omni", "nemotron_omni", "NemotronOmniProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("openai", "openai", "OpenAIProvider", 144, "direct"),
+    ImageBackedPdfProviderSpec("paddleocr", "paddleocr", "PaddleOCRProvider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("qwen3_5", "qwen3_5", "Qwen35Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("surya2", "surya2", "Surya2Provider", 144, "adapter"),
+    ImageBackedPdfProviderSpec("tesseract", "tesseract", "TesseractProvider", 144, "direct"),
+    ImageBackedPdfProviderSpec("textract", "textract", "TextractProvider", 300, "direct"),
+    ImageBackedPdfProviderSpec("unlimitedocr", "unlimitedocr", "UnlimitedOCRProvider", 144, "adapter"),
+)
 
 # Public operational-stat fields consumed by evaluation/stats.py. Totals are
 # additive across requests; per-page values are arithmetic means.

@@ -11,26 +11,14 @@ import pytest
 from PIL import Image
 
 from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
 from parse_bench.schemas.product import ProductType
 
 ADAPTER_PROVIDERS = [
-    ("chandra2", "Chandra2Provider", 144),
-    ("deepseekocr2", "DeepSeekOCR2Provider", 144),
-    ("falconocr", "FalconOcrProvider", 144),
-    ("gemma4", "Gemma4Provider", 144),
-    ("granite_vision", "GraniteVisionProvider", 144),
-    ("infinity_parser2", "InfinityParser2Provider", 300),
-    ("mineru25", "MinerU25Provider", 144),
-    ("mineru2605pro", "MinerU2605ProProvider", 144),
-    ("mineru_diffusion", "MinerUDiffusionProvider", 144),
-    ("nemotron_omni", "NemotronOmniProvider", 144),
-    ("paddleocr", "PaddleOCRProvider", 144),
-    ("qwen3_5", "Qwen35Provider", 144),
-    ("surya2", "Surya2Provider", 144),
-    ("unlimitedocr", "UnlimitedOCRProvider", 144),
+    (spec.module_name, spec.class_name, spec.dpi) for spec in IMAGE_BACKED_PDF_PROVIDERS if spec.execution == "adapter"
 ]
 
 
@@ -68,7 +56,13 @@ def _provider(module_name: str, class_name: str, dpi: int) -> Any:
     return provider
 
 
-def _install_local_boundary(provider: Any, module_name: str) -> list[int]:
+def _install_local_boundary(
+    provider: Any,
+    module_name: str,
+    *,
+    failure: Exception | None = None,
+    fail_on_call: int = 1,
+) -> list[int]:
     calls: list[int] = []
 
     def raw_output(page_number: int) -> dict[str, object]:
@@ -100,6 +94,8 @@ def _install_local_boundary(provider: Any, module_name: str) -> list[int]:
 
         def parse_document(path: str) -> dict[str, object]:
             calls.append(len(calls) + 1)
+            if failure is not None and calls[-1] == fail_on_call:
+                raise failure
             return raw_output(calls[-1])
 
         provider._parse_document = parse_document
@@ -107,6 +103,8 @@ def _install_local_boundary(provider: Any, module_name: str) -> list[int]:
 
         async def run_inference_async(*args: object, **kwargs: object) -> dict[str, object]:
             calls.append(len(calls) + 1)
+            if failure is not None and calls[-1] == fail_on_call:
+                raise failure
             return raw_output(calls[-1])
 
         provider._run_inference_async = run_inference_async
@@ -260,9 +258,44 @@ def test_paddleocr_page_two_failure_aborts_without_partial_result(
             image.getpixel((0, 0))
 
 
+@pytest.mark.parametrize(("module_name", "class_name", "expected_dpi"), ADAPTER_PROVIDERS)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderPermanentError("page two is invalid"),
+        ProviderTransientError("page two timed out"),
+    ],
+    ids=["permanent", "transient"],
+)
+def test_adapter_provider_page_failure_aborts_without_partial_result(
+    module_name: str,
+    class_name: str,
+    expected_dpi: int,
+    failure: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered = _mock_two_page_pdf(source, monkeypatch)
+    provider = _provider(module_name, class_name, expected_dpi)
+    calls = _install_local_boundary(provider, module_name, failure=failure, fail_on_call=2)
+    successful_result = None
+
+    with pytest.raises(type(failure), match=str(failure)):
+        successful_result = provider.run_inference(_pipeline(module_name), _request(source))
+
+    assert successful_result is None
+    assert calls == [1, 2]
+    assert len(rendered) == 2
+    for image in rendered:
+        with pytest.raises(ValueError, match="Operation on closed image"):
+            image.getpixel((0, 0))
+
+
 @pytest.mark.parametrize(
     "module_name",
-    ["amazon_nova", "dots_ocr", "anthropic", "google", "openai", "tesseract", "textract"],
+    [spec.module_name for spec in IMAGE_BACKED_PDF_PROVIDERS if spec.execution == "direct"],
 )
 def test_refactored_providers_do_not_call_pdf2image_eagerly(module_name: str) -> None:
     module = importlib.import_module(f"parse_bench.inference.providers.parse.{module_name}")
@@ -291,3 +324,43 @@ def test_shared_rasterizer_bounds_every_convert_from_path_call() -> None:
 
     assert len(calls) == 1
     assert {keyword.arg for keyword in calls[0].keywords} >= {"first_page", "last_page"}
+
+
+def test_every_registered_local_pdf_raster_provider_is_classified() -> None:
+    provider_dir = Path(__file__).parents[5] / "src/parse_bench/inference/providers/parse"
+    registered: dict[str, tuple[str, str]] = {}
+    raster_provider_names: set[str] = set()
+
+    for source_path in provider_dir.glob("*.py"):
+        tree = ast.parse(source_path.read_text())
+        module_registrations: list[tuple[str, str]] = []
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for decorator in node.decorator_list:
+                if (
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id == "register_provider"
+                    and decorator.args
+                    and isinstance(decorator.args[0], ast.Constant)
+                    and isinstance(decorator.args[0].value, str)
+                ):
+                    registration = (decorator.args[0].value, node.name)
+                    module_registrations.append(registration)
+                    registered[registration[0]] = (source_path.stem, registration[1])
+
+        local_raster_calls = {
+            getattr(node.func, "id", getattr(node.func, "attr", None))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
+        }
+        if local_raster_calls & {"run_pdf_pages", "open_document_page_images", "get_pixmap"}:
+            raster_provider_names.update(provider_name for provider_name, _ in module_registrations)
+
+    classified = {spec.provider_name for spec in IMAGE_BACKED_PDF_PROVIDERS}
+    assert classified == raster_provider_names
+    assert {spec.provider_name: (spec.module_name, spec.class_name) for spec in IMAGE_BACKED_PDF_PROVIDERS} == {
+        provider_name: registered[provider_name] for provider_name in classified
+    }
+    assert {spec.execution for spec in IMAGE_BACKED_PDF_PROVIDERS} == {"adapter", "direct", "kdl"}

@@ -8,19 +8,14 @@ import pytest
 from PIL import Image
 
 from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
 from parse_bench.schemas.product import ProductType
 
 LEGACY_PROVIDERS = [
-    ("amazon_nova", "AmazonNovaProvider", 150),
-    ("anthropic", "AnthropicProvider", 144),
-    ("dots_ocr", "DotsOcrParseProvider", 144),
-    ("google", "GoogleProvider", 144),
-    ("openai", "OpenAIProvider", 144),
-    ("tesseract", "TesseractProvider", 144),
-    ("textract", "TextractProvider", 300),
+    (spec.module_name, spec.class_name, spec.dpi) for spec in IMAGE_BACKED_PDF_PROVIDERS if spec.execution == "direct"
 ]
 
 

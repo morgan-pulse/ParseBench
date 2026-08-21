@@ -9,9 +9,12 @@ from PIL import Image
 
 from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
 from parse_bench.inference.providers.parse import kdl_frontier_nano as kdl
+from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
 from parse_bench.schemas.product import ProductType
+
+KDL_SPEC = next(spec for spec in IMAGE_BACKED_PDF_PROVIDERS if spec.execution == "kdl")
 
 
 def _pipeline() -> PipelineSpec:
@@ -32,7 +35,7 @@ def _request(source: Path) -> InferenceRequest:
 
 def _provider() -> kdl.KdlFrontierNanoProvider:
     provider = object.__new__(kdl.KdlFrontierNanoProvider)
-    provider._dpi = 144
+    provider._dpi = KDL_SPEC.dpi
     provider._endpoint_url = "http://provider.invalid/v1"
     provider._model = "test-model"
     provider._max_concurrent = 1
