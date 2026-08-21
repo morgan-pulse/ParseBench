@@ -46,7 +46,7 @@ import os
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -323,7 +323,12 @@ def normalize_image_mode(image: Image.Image, target_mode: str = "RGB") -> Image.
     if image.mode == "RGBA" and target_mode == "RGB":
         # RGBA를 RGB로 변환 시 흰색 배경 추가
         background = Image.new("RGB", image.size, ImageConfig.DEFAULT_BACKGROUND_COLOR)
-        background.paste(image, mask=image.split()[3])  # 알파 채널을 마스크로 사용
+        try:
+            with image.getchannel("A") as alpha:
+                background.paste(image, mask=alpha)
+        except Exception:
+            background.close()
+            raise
         return background
 
     return image.convert(target_mode)
@@ -416,78 +421,81 @@ def is_monochromatic(image: Image.Image) -> bool:
 def analyze_page_content(image: Image.Image) -> PageContentMetrics:
     """Estimate whether a page has visible content without calling a detector."""
     try:
-        normalized = normalize_image_mode(image, "RGB")
-        width, height = normalized.size
-        scale = min(1.0, CONTENT_ANALYSIS_MAX_DIMENSION / max(width, height))
-        if scale < 1.0:
-            sample_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-            normalized = normalized.resize(
-                sample_size,
-                resample=Image.Resampling.BILINEAR,
+        with close_derived_images(image) as track:
+            normalized = track(normalize_image_mode(image, "RGB"))
+            width, height = normalized.size
+            scale = min(1.0, CONTENT_ANALYSIS_MAX_DIMENSION / max(width, height))
+            if scale < 1.0:
+                sample_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+                normalized = track(
+                    normalized.resize(
+                        sample_size,
+                        resample=Image.Resampling.BILINEAR,
+                    )
+                )
+
+            grayscale = track(normalized.convert("L"))
+            pixels = list(grayscale.getdata())
+            total_pixels = len(pixels)
+            if total_pixels == 0:
+                return PageContentMetrics(
+                    foreground_ratio=0.0,
+                    edge_ratio=0.0,
+                    intensity_variance=0.0,
+                    is_blank=True,
+                )
+
+            sorted_pixels = sorted(pixels)
+            background_index = min(
+                total_pixels - 1,
+                int(total_pixels * 0.95),
+            )
+            background_level = sorted_pixels[background_index]
+            foreground_pixels = sum(
+                1
+                for value in pixels
+                if (
+                    background_level - value >= FOREGROUND_DELTA_THRESHOLD
+                    and value < FOREGROUND_DARK_THRESHOLD
+                )
+            )
+            foreground_ratio = foreground_pixels / total_pixels
+
+            mean = sum(pixels) / total_pixels
+            intensity_variance = sum((value - mean) ** 2 for value in pixels) / total_pixels
+
+            sample_width, sample_height = grayscale.size
+            edge_pairs = 0
+            edge_hits = 0
+            for y in range(sample_height):
+                row_offset = y * sample_width
+                for x in range(sample_width):
+                    value = pixels[row_offset + x]
+                    if x + 1 < sample_width:
+                        edge_pairs += 1
+                        if abs(value - pixels[row_offset + x + 1]) >= EDGE_DELTA_THRESHOLD:
+                            edge_hits += 1
+                    if y + 1 < sample_height:
+                        edge_pairs += 1
+                        if (
+                            abs(value - pixels[row_offset + sample_width + x])
+                            >= EDGE_DELTA_THRESHOLD
+                        ):
+                            edge_hits += 1
+
+            edge_ratio = edge_hits / edge_pairs if edge_pairs else 0.0
+            is_blank = (
+                foreground_ratio < BLANK_FOREGROUND_RATIO_THRESHOLD
+                and edge_ratio < BLANK_EDGE_RATIO_THRESHOLD
+                and intensity_variance < BLANK_INTENSITY_VARIANCE_THRESHOLD
             )
 
-        grayscale = normalized.convert("L")
-        pixels = list(grayscale.getdata())
-        total_pixels = len(pixels)
-        if total_pixels == 0:
             return PageContentMetrics(
-                foreground_ratio=0.0,
-                edge_ratio=0.0,
-                intensity_variance=0.0,
-                is_blank=True,
+                foreground_ratio=round(foreground_ratio, 6),
+                edge_ratio=round(edge_ratio, 6),
+                intensity_variance=round(float(intensity_variance), 6),
+                is_blank=is_blank,
             )
-
-        sorted_pixels = sorted(pixels)
-        background_index = min(
-            total_pixels - 1,
-            int(total_pixels * 0.95),
-        )
-        background_level = sorted_pixels[background_index]
-        foreground_pixels = sum(
-            1
-            for value in pixels
-            if (
-                background_level - value >= FOREGROUND_DELTA_THRESHOLD
-                and value < FOREGROUND_DARK_THRESHOLD
-            )
-        )
-        foreground_ratio = foreground_pixels / total_pixels
-
-        mean = sum(pixels) / total_pixels
-        intensity_variance = sum((value - mean) ** 2 for value in pixels) / total_pixels
-
-        sample_width, sample_height = grayscale.size
-        edge_pairs = 0
-        edge_hits = 0
-        for y in range(sample_height):
-            row_offset = y * sample_width
-            for x in range(sample_width):
-                value = pixels[row_offset + x]
-                if x + 1 < sample_width:
-                    edge_pairs += 1
-                    if abs(value - pixels[row_offset + x + 1]) >= EDGE_DELTA_THRESHOLD:
-                        edge_hits += 1
-                if y + 1 < sample_height:
-                    edge_pairs += 1
-                    if (
-                        abs(value - pixels[row_offset + sample_width + x])
-                        >= EDGE_DELTA_THRESHOLD
-                    ):
-                        edge_hits += 1
-
-        edge_ratio = edge_hits / edge_pairs if edge_pairs else 0.0
-        is_blank = (
-            foreground_ratio < BLANK_FOREGROUND_RATIO_THRESHOLD
-            and edge_ratio < BLANK_EDGE_RATIO_THRESHOLD
-            and intensity_variance < BLANK_INTENSITY_VARIANCE_THRESHOLD
-        )
-
-        return PageContentMetrics(
-            foreground_ratio=round(foreground_ratio, 6),
-            edge_ratio=round(edge_ratio, 6),
-            intensity_variance=round(float(intensity_variance), 6),
-            is_blank=is_blank,
-        )
     except Exception as e:
         logger.warning(f"Failed to analyze page content: {e}")
         return PageContentMetrics(
@@ -509,12 +517,17 @@ def preprocess_for_vlm(image: Image.Image) -> Image.Image:
         전처리된 PIL 이미지
     """
     # 1. 이미지 모드 정규화
-    image = normalize_image_mode(image, "RGB")
+    normalized = normalize_image_mode(image, "RGB")
+    try:
+        processed = smart_resize(normalized)
+    except Exception:
+        if normalized is not image:
+            normalized.close()
+        raise
 
-    # 2. 스마트 리사이즈
-    image = smart_resize(image)
-
-    return image
+    if processed is not normalized and normalized is not image:
+        normalized.close()
+    return processed
 
 # ==========================================================================
 # [vendored] native_layout
@@ -624,10 +637,15 @@ def is_native_layout_response(content: Any) -> bool:
 
 
 def prepare_native_layout_image(image: Image.Image) -> Image.Image:
-    return image.convert("RGB").resize(
-        NATIVE_LAYOUT_IMAGE_SIZE,
-        Image.Resampling.BICUBIC,
-    )
+    converted = image.convert("RGB")
+    try:
+        return converted.resize(
+            NATIVE_LAYOUT_IMAGE_SIZE,
+            Image.Resampling.BICUBIC,
+        )
+    finally:
+        if converted is not image:
+            converted.close()
 
 
 def parse_native_raw_layout_tokens(content: str) -> list[NativeLayoutItem]:
@@ -2675,10 +2693,12 @@ def _nano_image_to_data_uri(image: Image.Image, *, lossless: bool = False) -> st
         mime_type = "image/png"
         image.save(buffered, format="PNG")
     else:
-        if image.mode not in ("L", "RGB", "CMYK"):
-            image = image.convert("RGB")
-        mime_type = "image/jpeg"
-        image.save(buffered, format="JPEG", quality=95)
+        with close_derived_images(image) as track:
+            encoded_image = image
+            if image.mode not in ("L", "RGB", "CMYK"):
+                encoded_image = track(image.convert("RGB"))
+            mime_type = "image/jpeg"
+            encoded_image.save(buffered, format="JPEG", quality=95)
     b64 = base64.b64encode(buffered.getvalue()).decode("ascii")
     return f"data:{mime_type};base64,{b64}"
 
@@ -2718,9 +2738,8 @@ async def _nano_chat(
     url: str,
     payload: dict,
     semaphore: asyncio.Semaphore,
-) -> str | None:
-    """POST a chat/completions request. Returns content, or None on failure
-    (the orchestrator keeps failed elements with content='')."""
+) -> str:
+    """POST a chat request, classifying terminal client and retryable failures."""
     last_exc: Exception | None = None
     async with semaphore:
         for attempt in range(3):  # tenacity stop_after_attempt(3) equivalent
@@ -2729,24 +2748,31 @@ async def _nano_chat(
                     url,
                     json={**payload, "chat_template_kwargs": {"enable_thinking": False}},
                 )
-                if resp.status_code >= 500:
+                if resp.status_code >= 500 or resp.status_code in (408, 429):
                     raise httpx.HTTPStatusError(
                         f"{resp.status_code}", request=resp.request, response=resp
                     )
                 if resp.status_code >= 400:
-                    logger.warning("4xx from endpoint (not retried): %s", resp.text[:200])
-                    return None
+                    raise ProviderPermanentError(
+                        f"Stage request rejected with HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            except (httpx.HTTPError, asyncio.TimeoutError, KeyError, ValueError) as e:
+                content = data["choices"][0]["message"]["content"]
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("stage response contained no text content")
+                return content
+            except (httpx.HTTPError, asyncio.TimeoutError, IndexError, KeyError, TypeError, ValueError) as e:
                 last_exc = e
-                await asyncio.sleep(min(10.0, 2.0 * (2 ** attempt)))
-    logger.warning("stage request failed after retries: %s", last_exc)
-    return None
+                if attempt < 2:
+                    await asyncio.sleep(min(10.0, 2.0 * (2**attempt)))
+    assert last_exc is not None
+    raise ProviderTransientError(f"Stage request failed after 3 attempts: {last_exc}") from last_exc
 
 
 def _nano_group_by_bucket(
-    content: List[Dict[str, Any]], original_image: Image.Image
+    content: List[Dict[str, Any]],
+    original_image: Image.Image,
+    track_image: Callable[[Image.Image], Image.Image],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Verbatim port of result_parser.group_content_by_category."""
     result: Dict[str, List[Dict[str, Any]]] = {
@@ -2773,8 +2799,8 @@ def _nano_group_by_bucket(
             pixel_height = lower - upper
             if pixel_width < 5 or pixel_height < 5:
                 continue
-            cropped_img = original_image.crop((left, upper, right, lower))
-            preprocessed_img = preprocess_for_vlm(cropped_img)
+            cropped_img = track_image(original_image.crop((left, upper, right, lower)))
+            preprocessed_img = track_image(preprocess_for_vlm(cropped_img))
             if is_monochromatic(preprocessed_img):
                 continue
         except Exception:
@@ -3076,6 +3102,23 @@ class _NanoEngine:
         image: Image.Image,
         page_no: int,
     ) -> List[Dict[str, Any]]:
+        with close_derived_images(image) as track:
+            return await self._parse_page_with_owned_images(
+                client,
+                semaphore,
+                image,
+                page_no,
+                track,
+            )
+
+    async def _parse_page_with_owned_images(
+        self,
+        client: httpx.AsyncClient,
+        semaphore: asyncio.Semaphore,
+        image: Image.Image,
+        page_no: int,
+        track: Callable[[Image.Image], Image.Image],
+    ) -> List[Dict[str, Any]]:
         w, h = image.size
         if min(w, h) < 32:
             return []
@@ -3085,7 +3128,7 @@ class _NanoEngine:
         except Exception:
             pass
 
-        layout_image = prepare_native_layout_image(image)
+        layout_image = track(prepare_native_layout_image(image))
         layout_content = await _nano_chat(
             client, self._url, _nano_payload("layout", self._model, layout_image),
             semaphore,
@@ -3098,12 +3141,12 @@ class _NanoEngine:
         items = parse_native_layout_tokens(layout_content)
         for item in items:
             item["page_number"] = page_no
-        buckets = _nano_group_by_bucket(items, image)
+        buckets = _nano_group_by_bucket(items, image, track)
 
         # native full-page table route (single-table pages preserve multi-line
         # cells only with full-page context; adopted only for single clean OTSL)
         fullpage_table = (
-            preprocess_for_vlm(image) if len(buckets["table"]) == 1 else None
+            track(preprocess_for_vlm(image)) if len(buckets["table"]) == 1 else None
         )
 
         tasks = []
@@ -3125,6 +3168,7 @@ class _NanoEngine:
                 el["content"] = content if content is not None else ""
 
         async def recognize_table_fullpage(el: Dict[str, Any]) -> None:
+            assert fullpage_table is not None
             content = await _nano_chat(
                 client, self._url,
                 _nano_payload("table", self._model, fullpage_table), semaphore,

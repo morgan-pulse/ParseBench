@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
+import httpx
 import pytest
 from PIL import Image
 
@@ -113,6 +117,199 @@ def _track_opened_and_normalized_images(
 def _assert_closed(image: Image.Image) -> None:
     with pytest.raises(ValueError, match="Operation on closed image"):
         image.getpixel((0, 0))
+
+
+def _content_image() -> Image.Image:
+    image = Image.new("RGB", (64, 64), "white")
+    for coordinate in range(8, 56):
+        image.putpixel((coordinate, coordinate), (0, 0, 0))
+    return image
+
+
+def _track_pillow_derivatives(monkeypatch: pytest.MonkeyPatch) -> list[Image.Image]:
+    derived: list[Image.Image] = []
+
+    def wrap(method_name: str) -> None:
+        real_method = getattr(Image.Image, method_name)
+
+        def tracked(image: Image.Image, *args: Any, **kwargs: Any) -> Image.Image:
+            result = real_method(image, *args, **kwargs)
+            result.close = Mock(wraps=result.close)
+            derived.append(result)
+            return result
+
+        monkeypatch.setattr(Image.Image, method_name, tracked)
+
+    for method_name in ("convert", "resize", "crop"):
+        wrap(method_name)
+    return derived
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type", "attempts"),
+    [(400, ProviderPermanentError, 1), (429, ProviderTransientError, 3), (503, ProviderTransientError, 3)],
+)
+def test_nano_chat_classifies_http_failures(
+    status_code: int,
+    error_type: type[Exception],
+    attempts: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class Client:
+        async def post(self, url: str, **kwargs: object) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            return httpx.Response(status_code, request=request, text="provider failure")
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(error_type, match=f"HTTP {status_code}|{status_code}") as caught:
+        asyncio.run(kdl._nano_chat(Client(), "http://provider.invalid", {}, asyncio.Semaphore(1)))
+
+    assert calls == attempts
+    if status_code >= 500 or status_code == 429:
+        assert isinstance(caught.value.__cause__, httpx.HTTPStatusError)
+
+
+def test_nano_chat_retries_invalid_responses_and_preserves_last_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class Client:
+        async def post(self, url: str, **kwargs: object) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            return httpx.Response(200, request=request, json={"choices": []})
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(ProviderTransientError, match="failed after 3 attempts") as caught:
+        asyncio.run(kdl._nano_chat(Client(), "http://provider.invalid", {}, asyncio.Semaphore(1)))
+
+    assert calls == 3
+    assert isinstance(caught.value.__cause__, IndexError)
+
+
+@pytest.mark.parametrize("fail_recognition", [False, True], ids=["monochromatic-skip", "gather-failure"])
+def test_kdl_real_page_stage_closes_every_derivative(
+    fail_recognition: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _content_image()
+    derived = _track_pillow_derivatives(monkeypatch)
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    layout = (
+        "<|box_start|>100 100 900 900<|box_end|>"
+        "<|ref_start|>text<|ref_end|>"
+    )
+    calls = 0
+
+    async def chat(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return layout
+        if fail_recognition:
+            raise ProviderTransientError("recognition exhausted")
+        return "recognized text"
+
+    if not fail_recognition:
+        page.paste("white", (6, 6, 58, 58))
+    monkeypatch.setattr(kdl, "_nano_chat", chat)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
+
+    if fail_recognition:
+        with pytest.raises(ProviderTransientError, match="recognition exhausted"):
+            asyncio.run(engine._parse_page(object(), asyncio.Semaphore(1), page, 1))
+    else:
+        assert asyncio.run(engine._parse_page(object(), asyncio.Semaphore(1), page, 1)) == []
+
+    assert derived
+    assert all(isinstance(image.close, Mock) and image.close.call_count == 1 for image in derived)
+    assert page.getpixel((0, 0)) == (255, 255, 255)
+    page.close()
+
+
+def test_kdl_real_page_two_stage_failure_aborts_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = [_content_image(), _content_image()]
+    derived = _track_pillow_derivatives(monkeypatch)
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    layout = (
+        "<|box_start|>100 100 900 900<|box_end|>"
+        "<|ref_start|>text<|ref_end|>"
+    )
+    calls = 0
+
+    async def chat(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise ProviderTransientError("page two layout exhausted")
+        return layout if calls == 1 else "page one text"
+
+    monkeypatch.setattr(kdl, "_nano_chat", chat)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
+    successful_result = None
+
+    with pytest.raises(ProviderTransientError, match="page two layout exhausted"):
+        successful_result = asyncio.run(engine.parse_pages(pages))
+
+    assert successful_result is None
+    assert calls == 3
+    assert derived
+    assert all(isinstance(image.close, Mock) and image.close.call_count == 1 for image in derived)
+    for page in pages:
+        assert page.getpixel((0, 0)) == (255, 255, 255)
+        page.close()
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["success", "encoding-failure"])
+def test_nano_data_uri_closes_rgb_conversion(
+    fail: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = Image.new("HSV", (8, 8), (0, 0, 255))
+    real_convert = Image.Image.convert
+    real_save = Image.Image.save
+    converted: list[Image.Image] = []
+
+    def convert(image: Image.Image, *args: Any, **kwargs: Any) -> Image.Image:
+        result = real_convert(image, *args, **kwargs)
+        result.close = Mock(wraps=result.close)
+        converted.append(result)
+        return result
+
+    def save(image: Image.Image, *args: Any, **kwargs: Any) -> None:
+        if fail:
+            raise RuntimeError("encoding failed")
+        real_save(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "convert", convert)
+    monkeypatch.setattr(Image.Image, "save", save)
+
+    if fail:
+        with pytest.raises(RuntimeError, match="encoding failed"):
+            kdl._nano_image_to_data_uri(original)
+    else:
+        assert kdl._nano_image_to_data_uri(original).startswith("data:image/jpeg;base64,")
+
+    assert len(converted) == 1
+    assert isinstance(converted[0].close, Mock) and converted[0].close.call_count == 1
+    assert original.getpixel((0, 0)) == (0, 0, 255)
+    original.close()
 
 
 def test_kdl_streams_pdf_pages_in_order_and_closes_owned_images(
