@@ -17,7 +17,11 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
-from parse_bench.inference.providers.parse._multipage_image import normalize_pdf_pages, run_pdf_pages
+from parse_bench.inference.providers.parse._multipage_image import (
+    close_derived_images,
+    normalize_pdf_pages,
+    run_pdf_pages,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -127,24 +131,27 @@ class InfinityParser2Provider(Provider):
                 parse_kwargs["temperature"] = self._temperature
 
             pil_image, page_width, page_height = load_image(file_path)
-            result = self._parser.parse(pil_image, **parse_kwargs)
+            try:
+                result = self._parser.parse(pil_image, **parse_kwargs)
 
-            if self._deep_parsing_mode:
-                result = self._apply_deep_parsing(result, pil_image)
+                if self._deep_parsing_mode:
+                    result = self._apply_deep_parsing(result, pil_image)
 
-            return {
-                "result": result,
-                "_config": {
-                    "model_name": self._model_name,
-                    "backend": "vllm-server",
-                    "api_url": self._api_url,
-                    "task_type": self._task_type,
-                    "output_format": self._output_format,
-                    "batch_size": self._batch_size,
-                    "page_width": page_width,
-                    "page_height": page_height,
-                },
-            }
+                return {
+                    "result": result,
+                    "_config": {
+                        "model_name": self._model_name,
+                        "backend": "vllm-server",
+                        "api_url": self._api_url,
+                        "task_type": self._task_type,
+                        "output_format": self._output_format,
+                        "batch_size": self._batch_size,
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    },
+                }
+            finally:
+                pil_image.close()
 
         except Exception as e:
             error_str = str(e).lower()
@@ -266,26 +273,29 @@ class InfinityParser2Provider(Provider):
             if not figure_elements:
                 return result
 
-            pil_figure_images = [
-                pil_image.crop(
-                    (
-                        max(0, int(elem["bbox"][0])),
-                        max(0, int(elem["bbox"][1])),
-                        min(pil_image.width, int(elem["bbox"][2])),
-                        min(pil_image.height, int(elem["bbox"][3])),
+            with close_derived_images(pil_image) as track:
+                pil_figure_images = [
+                    track(
+                        pil_image.crop(
+                            (
+                                max(0, int(elem["bbox"][0])),
+                                max(0, int(elem["bbox"][1])),
+                                min(pil_image.width, int(elem["bbox"][2])),
+                                min(pil_image.height, int(elem["bbox"][3])),
+                            )
+                        )
                     )
-                )
-                for elem in figure_elements
-            ]
+                    for elem in figure_elements
+                ]
 
-            deep_parse_kwargs = {
-                "task_type": "custom",
-                "custom_prompt": "please convert the image to a markdown table",
-                "max_new_tokens": 2048,
-            }
-            deep_results = [self._parser.parse(img, **deep_parse_kwargs) for img in pil_figure_images]
-            for elem, deep_result in zip(figure_elements, deep_results, strict=True):
-                elem["text"] = deep_result
+                deep_parse_kwargs = {
+                    "task_type": "custom",
+                    "custom_prompt": "please convert the image to a markdown table",
+                    "max_new_tokens": 2048,
+                }
+                deep_results = [self._parser.parse(img, **deep_parse_kwargs) for img in pil_figure_images]
+                for elem, deep_result in zip(figure_elements, deep_results, strict=True):
+                    elem["text"] = deep_result
 
             return json.dumps(elements)
 
@@ -425,9 +435,14 @@ def load_image(file_path: str) -> tuple[PILImage.Image, float, float]:
         images = convert_from_path(str(path), dpi=300, first_page=1, last_page=1)
         if not images:
             raise ProviderPermanentError(f"Failed to render PDF page: {file_path}")
-        pil_image = images[0].convert("RGB")
+        try:
+            pil_image = images[0].convert("RGB")
+        finally:
+            for image in images:
+                image.close()
     else:
-        pil_image = PILImage.open(str(path)).convert("RGB")
+        with PILImage.open(str(path)) as image:
+            pil_image = image.convert("RGB")
 
     width, height = pil_image.size
     return pil_image, float(width), float(height)

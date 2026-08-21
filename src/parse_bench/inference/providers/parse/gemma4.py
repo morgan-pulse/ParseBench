@@ -164,8 +164,8 @@ class Gemma4Provider(Provider):
         from PIL import Image
 
         try:
-            img = Image.open(file_path)
-            w, h = img.size
+            with Image.open(file_path) as img:
+                w, h = img.size
             return file_path.read_bytes(), w, h
         except Exception as e:
             raise ProviderPermanentError(f"Error reading image file: {e}") from e
