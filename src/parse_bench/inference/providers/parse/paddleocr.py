@@ -290,53 +290,26 @@ class PaddleOCRProvider(Provider):
             )
 
         try:
-            # Run async inference
             raw_output = asyncio.run(self._run_inference_async(image_bytes))
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            raise ProviderTransientError(f"PaddleOCR request failed: {exc}") from exc
+        except Exception as exc:
+            raise ProviderPermanentError(f"Unexpected error during PaddleOCR inference: {exc}") from exc
 
-            completed_at = datetime.now()
-            latency_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-            return RawInferenceResult(
-                request=request,
-                pipeline=pipeline,
-                pipeline_name=pipeline.pipeline_name,
-                product_type=request.product_type,
-                raw_output=raw_output,
-                started_at=started_at,
-                completed_at=completed_at,
-                latency_in_ms=latency_ms,
-            )
-
-        except (TimeoutError, ProviderPermanentError, ProviderTransientError, Exception) as e:
-            # Return empty result with error info instead of failing
-            # This allows workflow to continue while tracking the error
-            completed_at = datetime.now()
-            latency_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-            error_msg = str(e)
-            if isinstance(e, asyncio.TimeoutError):
-                error_msg = f"Request timed out after {self._timeout} seconds"
-
-            return RawInferenceResult(
-                request=request,
-                pipeline=pipeline,
-                pipeline_name=pipeline.pipeline_name,
-                product_type=request.product_type,
-                raw_output={
-                    "markdown": "",
-                    "_error": error_msg,
-                    "_error_type": type(e).__name__,
-                    "_config": {
-                        "server_url": self._server_url,
-                        "api_format": self._api_format,
-                        "task": self._task,
-                        "dpi": self._dpi,
-                    },
-                },
-                started_at=started_at,
-                completed_at=completed_at,
-                latency_in_ms=latency_ms,
-            )
+        completed_at = datetime.now()
+        latency_ms = int((completed_at - started_at).total_seconds() * 1000)
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output=raw_output,
+            started_at=started_at,
+            completed_at=completed_at,
+            latency_in_ms=latency_ms,
+        )
 
     @staticmethod
     def _sanitize_html_attributes(markdown: str) -> str:

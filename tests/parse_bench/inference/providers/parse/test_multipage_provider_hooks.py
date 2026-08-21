@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderPermanentError
+from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -218,6 +218,46 @@ def test_adapter_provider_closes_rendered_page_when_persistence_fails(
     assert len(rendered) == 1
     with pytest.raises(ValueError, match="Operation on closed image"):
         rendered[0].getpixel((0, 0))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderPermanentError("page two is invalid"),
+        ProviderTransientError("page two timed out"),
+    ],
+    ids=["permanent", "transient"],
+)
+def test_paddleocr_page_two_failure_aborts_without_partial_result(
+    failure: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered = _mock_two_page_pdf(source, monkeypatch)
+    provider = _provider("paddleocr", "PaddleOCRProvider", 144)
+    calls = 0
+    successful_result = None
+
+    async def run_inference_async(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise failure
+        return {"markdown": "page 1"}
+
+    provider._run_inference_async = run_inference_async
+
+    with pytest.raises(type(failure), match=str(failure)):
+        successful_result = provider.run_inference(_pipeline("paddleocr"), _request(source))
+
+    assert successful_result is None
+    assert calls == 2
+    assert len(rendered) == 2
+    for image in rendered:
+        with pytest.raises(ValueError, match="Operation on closed image"):
+            image.getpixel((0, 0))
 
 
 @pytest.mark.parametrize(
