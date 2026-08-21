@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,6 +13,9 @@ from parse_bench.inference.providers.parse._layout_utils import (
     parse_layout_blocks,
 )
 from parse_bench.inference.providers.parse.amazon_nova import AmazonNovaProvider
+from parse_bench.schemas.pipeline import PipelineSpec
+from parse_bench.schemas.pipeline_io import InferenceRequest
+from parse_bench.schemas.product import ProductType
 
 
 class _FakeBedrockClient:
@@ -42,6 +46,22 @@ def _provider(**attrs: Any) -> AmazonNovaProvider:
     for key, value in defaults.items():
         setattr(provider, key, value)
     return provider
+
+
+def _pipeline() -> PipelineSpec:
+    return PipelineSpec(
+        pipeline_name="amazon_nova_test",
+        provider_name="amazon_nova",
+        product_type=ProductType.PARSE,
+    )
+
+
+def _request(source: Path) -> InferenceRequest:
+    return InferenceRequest(
+        example_id="document",
+        source_file_path=str(source),
+        product_type=ProductType.PARSE,
+    )
 
 
 def test_geo_profile_is_priced_at_the_regional_rate() -> None:
@@ -157,6 +177,90 @@ def test_empty_response_is_rejected_rather_than_parsed_as_a_blank_page() -> None
 
     with pytest.raises(ProviderTransientError, match="no text"):
         provider._converse(Image.new("RGB", (64, 64), "white"), "system", "user")
+
+
+def test_pdf_run_inference_renders_and_calls_bedrock_one_page_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered_pages: list[Image.Image] = []
+    render_calls: list[int] = []
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        assert Path(path) == source
+        assert dpi == 150
+        assert first_page == last_page
+        if rendered_pages:
+            with pytest.raises(ValueError, match="Operation on closed image"):
+                rendered_pages[-1].getpixel((0, 0))
+        render_calls.append(first_page)
+        image = Image.new("RGB", (10 + first_page, 20), "white")
+        rendered_pages.append(image)
+        return [image]
+
+    monkeypatch.setattr("pdf2image.convert_from_path", render_page)
+    provider = _provider()
+    provider._client = _FakeBedrockClient(
+        {
+            "output": {"message": {"content": [{"text": '<div data-bbox="[0,0,10,10]" data-label="Text">page</div>'}]}},
+            "usage": {"inputTokens": 2, "outputTokens": 1, "totalTokens": 3},
+            "stopReason": "end_turn",
+        }
+    )
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert render_calls == [1, 2]
+    assert len(provider._client.calls) == 2
+    assert result.raw_output["num_pages"] == 2
+    assert [page["width"] for page in result.raw_output["pages"]] == [11, 12]
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        rendered_pages[-1].getpixel((0, 0))
+
+
+def test_single_image_run_inference_calls_bedrock_without_pdf_rasterization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (13, 17), "white").save(source)
+    real_open = Image.open
+    close_calls = 0
+
+    class TrackedImageContext:
+        def __init__(self, path: str | Path, *args: Any, **kwargs: Any) -> None:
+            self.image = real_open(path, *args, **kwargs)
+
+        def __enter__(self) -> Image.Image:
+            return self.image
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            self.image.close()
+
+    monkeypatch.setattr(Image, "open", TrackedImageContext)
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda *args, **kwargs: pytest.fail("single images must not be rasterized as PDFs"),
+    )
+    provider = _provider()
+    provider._client = _FakeBedrockClient(
+        {
+            "output": {"message": {"content": [{"text": '<div data-bbox="[0,0,10,10]" data-label="Text">page</div>'}]}},
+            "usage": {"inputTokens": 2, "outputTokens": 1, "totalTokens": 3},
+            "stopReason": "end_turn",
+        }
+    )
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert len(provider._client.calls) == 1
+    assert result.raw_output["num_pages"] == 1
+    assert result.raw_output["pages"][0]["width"] == 13
+    assert close_calls == 1
 
 
 NESTED_LAYOUT = (

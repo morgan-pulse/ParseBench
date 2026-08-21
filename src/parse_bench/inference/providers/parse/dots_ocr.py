@@ -14,7 +14,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from openai import OpenAI
 from PIL import Image
@@ -26,6 +26,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -191,16 +192,6 @@ class DotsOcrParseProvider(Provider):
         buffer.seek(0)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-    def _pdf_to_images(self, pdf_path: str) -> list[Image.Image]:
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as e:
-            raise ProviderConfigError("pdf2image package not installed. Run: pip install pdf2image") from e
-        try:
-            return convert_from_path(pdf_path, dpi=self._dpi)
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to convert PDF to images: {e}") from e
-
     # ------------------------------------------------------------------
     # API call
     # ------------------------------------------------------------------
@@ -236,7 +227,7 @@ class DotsOcrParseProvider(Provider):
         content = response.choices[0].message.content
         if not content:
             raise ProviderPermanentError("Empty response from model")
-        return content
+        return cast(str, content)
 
     # ------------------------------------------------------------------
     # HTML sanitization
@@ -287,7 +278,7 @@ class DotsOcrParseProvider(Provider):
         adapter = TypeAdapter(list[DotsOcrLayoutItem])
         for candidate in candidates:
             try:
-                return adapter.validate_json(candidate)
+                return cast(list[DotsOcrLayoutItem], adapter.validate_json(candidate))
             except Exception:
                 continue
 
@@ -299,43 +290,43 @@ class DotsOcrParseProvider(Provider):
 
     def _run_inference_pages(self, source_path: Path) -> dict[str, Any]:
         """Convert source file to images and run inference on each page."""
-        if source_path.suffix.lower() == ".pdf":
-            images = self._pdf_to_images(str(source_path))
-        else:
-            images = [Image.open(source_path)]
-
         pages = []
-        for page_index, image in enumerate(images):
-            if image.mode not in ("RGB", "RGBA"):
-                image = image.convert("RGB")
-
-            raw_text = self._call_endpoint(image)
-
-            page_data: dict[str, Any] = {
-                "page_index": page_index,
-                "width": image.width,
-                "height": image.height,
-                "raw_response": raw_text,
-            }
-
-            if self._is_layout_mode:
-                # Parse structured JSON → typed layout items + reassemble markdown
+        with open_document_page_images(source_path, dpi=self._dpi) as images:
+            for page_index, image in enumerate(images):
+                page_image = image if image.mode in ("RGB", "RGBA") else image.convert("RGB")
                 try:
-                    layout_items = self._parse_layout_items(raw_text)
-                except ProviderPermanentError:
-                    layout_items = []
+                    raw_text = self._call_endpoint(page_image)
 
-                page_data["layout_items"] = [item.model_dump() for item in layout_items]
-                page_data["markdown"] = _reassemble_markdown(layout_items)
-            else:
-                page_data["markdown"] = raw_text
-                page_data["layout_items"] = []
+                    page_data: dict[str, Any] = {
+                        "page_index": page_index,
+                        "width": page_image.width,
+                        "height": page_image.height,
+                        "raw_response": raw_text,
+                    }
 
-            pages.append(page_data)
+                    if self._is_layout_mode:
+                        # Parse structured JSON → typed layout items + reassemble markdown
+                        try:
+                            layout_items = self._parse_layout_items(raw_text)
+                        except ProviderPermanentError:
+                            layout_items = []
+
+                        page_data["layout_items"] = [item.model_dump() for item in layout_items]
+                        page_data["markdown"] = _reassemble_markdown(layout_items)
+                    else:
+                        page_data["markdown"] = raw_text
+                        page_data["layout_items"] = []
+
+                    pages.append(page_data)
+                finally:
+                    if page_image is not image:
+                        page_image.close()
+
+            num_pages = len(images)
 
         return {
             "pages": pages,
-            "num_pages": len(images),
+            "num_pages": num_pages,
             "model": self._model,
             "prompt_mode": self._prompt_mode,
             "config": {

@@ -10,6 +10,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -59,60 +60,56 @@ class TesseractProvider(Provider):
         """
         try:
             import pytesseract
-            from pdf2image import convert_from_path
         except ImportError as e:
-            missing_pkg = "pytesseract" if "pytesseract" in str(e) else "pdf2image"
-            raise ProviderConfigError(
-                f"{missing_pkg} package not installed. Run: pip install pytesseract pdf2image"
-            ) from e
+            raise ProviderConfigError("pytesseract package not installed. Run: pip install pytesseract") from e
 
         try:
-            # Convert PDF pages to images
-            images = convert_from_path(pdf_path, dpi=self._dpi)
-
             pages = []
-            for page_index, image in enumerate(images):
-                try:
-                    # Perform OCR based on output type
-                    if self._output_type == "text":
-                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "dict":
-                        data = pytesseract.image_to_data(
-                            image,
-                            lang=self._lang,
-                            config=self._config,
-                            output_type=pytesseract.Output.DICT,
-                        )
-                        text = " ".join([word for word in data.get("text", []) if word.strip()])
-                    elif self._output_type == "data":
-                        text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "boxes":
-                        text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "osd":
-                        text = pytesseract.image_to_osd(image, config=self._config)
-                    else:
-                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+            with open_document_page_images(pdf_path, dpi=self._dpi) as images:
+                for page_index, image in enumerate(images):
+                    try:
+                        # Perform OCR based on output type
+                        if self._output_type == "text":
+                            text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+                        elif self._output_type == "dict":
+                            data = pytesseract.image_to_data(
+                                image,
+                                lang=self._lang,
+                                config=self._config,
+                                output_type=pytesseract.Output.DICT,
+                            )
+                            text = " ".join([word for word in data.get("text", []) if word.strip()])
+                        elif self._output_type == "data":
+                            text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
+                        elif self._output_type == "boxes":
+                            text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
+                        elif self._output_type == "osd":
+                            text = pytesseract.image_to_osd(image, config=self._config)
+                        else:
+                            text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
 
-                    pages.append(
-                        {
-                            "page_index": page_index,
-                            "text": text,
-                            "width": image.width,
-                            "height": image.height,
-                        }
-                    )
-                except Exception as e:
-                    pages.append(
-                        {
-                            "page_index": page_index,
-                            "text": "",
-                            "error": str(e),
-                        }
-                    )
+                        pages.append(
+                            {
+                                "page_index": page_index,
+                                "text": text,
+                                "width": image.width,
+                                "height": image.height,
+                            }
+                        )
+                    except Exception as e:
+                        pages.append(
+                            {
+                                "page_index": page_index,
+                                "text": "",
+                                "error": str(e),
+                            }
+                        )
+
+                num_pages = len(images)
 
             return {
                 "pages": pages,
-                "num_pages": len(images),
+                "num_pages": num_pages,
                 "config": {
                     "lang": self._lang,
                     "dpi": self._dpi,

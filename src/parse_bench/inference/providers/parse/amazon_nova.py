@@ -36,6 +36,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
     items_to_markdown,
     parse_layout_blocks,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -280,21 +281,7 @@ class AmazonNovaProvider(Provider):
         image.save(buffer, format="JPEG", quality=min_quality)
         return buffer.getvalue()
 
-    def _pdf_to_images(self, pdf_path: str) -> list[Image.Image]:
-        """Convert PDF pages to images."""
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as e:
-            raise ProviderConfigError("pdf2image package not installed. Run: pip install pdf2image") from e
-
-        try:
-            return convert_from_path(pdf_path, dpi=self._dpi)
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to convert PDF to images: {e}") from e
-
-    def _converse(
-        self, image: Image.Image, system_prompt: str, user_prompt: str
-    ) -> tuple[str, dict[str, int], str]:
+    def _converse(self, image: Image.Image, system_prompt: str, user_prompt: str) -> tuple[str, dict[str, int], str]:
         """Send one page image to Bedrock Converse and return (text, usage, stop_reason)."""
         image_bytes = self._image_to_jpeg_bytes(image)
 
@@ -345,9 +332,7 @@ class AmazonNovaProvider(Provider):
 
         return text, self._extract_usage(response), stop_reason
 
-    def _parse_image_with_layout(
-        self, image: Image.Image
-    ) -> tuple[list[dict[str, Any]], str, dict[str, int], str]:
+    def _parse_image_with_layout(self, image: Image.Image) -> tuple[list[dict[str, Any]], str, dict[str, int], str]:
         """Parse a page image to layout-annotated markdown blocks."""
         text, usage, stop_reason = self._converse(image, SYSTEM_PROMPT_LAYOUT, USER_PROMPT_LAYOUT)
         # Prefer the lenient reader (Nova uses <TABLE>/<p> wrappers and leaves
@@ -384,26 +369,22 @@ class AmazonNovaProvider(Provider):
         try:
             page_usages: list[dict[str, int]] = []
 
-            if source_path.suffix.lower() == ".pdf":
-                images = self._pdf_to_images(str(source_path))
-            else:
-                images = [Image.open(source_path)]
-
             pages: list[dict[str, Any]] = []
-            for page_index, image in enumerate(images):
-                items, raw_content, usage, stop_reason = self._parse_image_with_layout(image)
-                page_usages.append(usage)
-                pages.append(
-                    {
-                        "page_index": page_index,
-                        "items": items,
-                        "raw_content": raw_content,
-                        "stop_reason": stop_reason,
-                        "width": image.width,
-                        "height": image.height,
-                    }
-                )
-            num_pages = len(images)
+            with open_document_page_images(source_path, dpi=self._dpi) as images:
+                for page_index, image in enumerate(images):
+                    items, raw_content, usage, stop_reason = self._parse_image_with_layout(image)
+                    page_usages.append(usage)
+                    pages.append(
+                        {
+                            "page_index": page_index,
+                            "items": items,
+                            "raw_content": raw_content,
+                            "stop_reason": stop_reason,
+                            "width": image.width,
+                            "height": image.height,
+                        }
+                    )
+                num_pages = len(images)
 
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)

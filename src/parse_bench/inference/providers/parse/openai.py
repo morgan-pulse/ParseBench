@@ -22,6 +22,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
     resolve_layout_prompts,
     split_pdf_to_pages,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -255,24 +256,6 @@ class OpenAIProvider(Provider):
         image.save(buffer, format="JPEG", quality=min_quality)
         buffer.seek(0)
         return base64.standard_b64encode(buffer.getvalue()).decode("utf-8")
-
-    def _pdf_to_images(self, pdf_path: str) -> list[Image.Image]:
-        """
-        Convert PDF pages to images.
-
-        :param pdf_path: Path to the PDF file
-        :return: List of PIL Images, one per page
-        """
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as e:
-            raise ProviderConfigError("pdf2image package not installed. Run: pip install pdf2image") from e
-
-        try:
-            images = convert_from_path(pdf_path, dpi=self._dpi)
-            return images
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to convert PDF to images: {e}") from e
 
     def _parse_image(self, image: Image.Image) -> tuple[str, dict[str, int]]:
         """
@@ -533,17 +516,17 @@ class OpenAIProvider(Provider):
                     num_pages = 1  # We don't know actual page count in file mode
                 else:
                     # Non-PDF: fall back to image-based parsing
-                    image = Image.open(source_path)
-                    markdown, usage = self._parse_image(image)
-                    page_usages.append(usage)
-                    pages = [
-                        {
-                            "page_index": 0,
-                            "markdown": markdown,
-                            "width": image.width,
-                            "height": image.height,
-                        }
-                    ]
+                    with Image.open(source_path) as image:
+                        markdown, usage = self._parse_image(image)
+                        page_usages.append(usage)
+                        pages = [
+                            {
+                                "page_index": 0,
+                                "markdown": markdown,
+                                "width": image.width,
+                                "height": image.height,
+                            }
+                        ]
                     num_pages = 1
             elif self._mode == "parse_with_layout_file":
                 if source_path.suffix.lower() == ".pdf":
@@ -565,54 +548,49 @@ class OpenAIProvider(Provider):
                     num_pages = len(pdf_pages)
                 else:
                     # Non-PDF: fall back to image-based layout parsing
-                    image = Image.open(source_path)
-                    items, raw_content, usage = self._parse_image_with_layout(image)
-                    page_usages.append(usage)
-                    pages = [
-                        {
-                            "page_index": 0,
-                            "items": items,
-                            "raw_content": raw_content,
-                            "width": image.width,
-                            "height": image.height,
-                        }
-                    ]
-                    num_pages = 1
-            else:
-                # Image mode (both "image" and "parse_with_layout"):
-                # convert PDF to images and process each page
-                if source_path.suffix.lower() == ".pdf":
-                    images = self._pdf_to_images(str(source_path))
-                else:
-                    images = [Image.open(source_path)]
-
-                # Parse each page
-                pages = []
-                for page_index, image in enumerate(images):  # type: ignore[assignment]
-                    if self._mode == "parse_with_layout":
+                    with Image.open(source_path) as image:
                         items, raw_content, usage = self._parse_image_with_layout(image)
                         page_usages.append(usage)
-                        pages.append(
+                        pages = [
                             {
-                                "page_index": page_index,
+                                "page_index": 0,
                                 "items": items,
                                 "raw_content": raw_content,
                                 "width": image.width,
                                 "height": image.height,
                             }
-                        )
-                    else:
-                        markdown, usage = self._parse_image(image)
-                        page_usages.append(usage)
-                        pages.append(
-                            {
-                                "page_index": page_index,
-                                "markdown": markdown,
-                                "width": image.width,
-                                "height": image.height,
-                            }
-                        )
-                num_pages = len(images)
+                        ]
+                    num_pages = 1
+            else:
+                # Image mode (both "image" and "parse_with_layout"):
+                # convert PDF to images and process each page
+                pages = []
+                with open_document_page_images(source_path, dpi=self._dpi) as images:
+                    for page_index, image in enumerate(images):
+                        if self._mode == "parse_with_layout":
+                            items, raw_content, usage = self._parse_image_with_layout(image)
+                            page_usages.append(usage)
+                            pages.append(
+                                {
+                                    "page_index": page_index,
+                                    "items": items,
+                                    "raw_content": raw_content,
+                                    "width": image.width,
+                                    "height": image.height,
+                                }
+                            )
+                        else:
+                            markdown, usage = self._parse_image(image)
+                            page_usages.append(usage)
+                            pages.append(
+                                {
+                                    "page_index": page_index,
+                                    "markdown": markdown,
+                                    "width": image.width,
+                                    "height": image.height,
+                                }
+                            )
+                    num_pages = len(images)
 
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)

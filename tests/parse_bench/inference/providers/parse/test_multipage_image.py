@@ -10,6 +10,7 @@ from PIL import Image
 from parse_bench.inference.providers.base import ProviderPermanentError
 from parse_bench.inference.providers.parse._multipage_image import (
     normalize_pdf_pages,
+    open_document_page_images,
     run_pdf_pages,
 )
 from parse_bench.schemas.parse_output import ParseLayoutPageIR, ParseOutput
@@ -177,6 +178,61 @@ def test_pdf_render_failure_identifies_page_and_stops(tmp_path: Path, monkeypatc
     assert render_calls == [1, 2]
 
 
+def test_inference_failure_closes_current_page_and_stops_rendering(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered_pages: list[Image.Image] = []
+    render_calls: list[int] = []
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        render_calls.append(first_page)
+        image = Image.new("RGB", (8, 8), "white")
+        rendered_pages.append(image)
+        return [image]
+
+    monkeypatch.setattr("pdf2image.convert_from_path", render_page)
+
+    def fail_inference(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        raise RuntimeError("inference failed")
+
+    with pytest.raises(RuntimeError, match="inference failed"):
+        run_pdf_pages(_pipeline(), _request(source), dpi=144, run_single_image=fail_inference)
+
+    assert render_calls == [1]
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        rendered_pages[0].getpixel((0, 0))
+
+
+def test_single_image_context_closes_the_image_after_inference(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "image.png"
+    Image.new("RGB", (8, 8), "white").save(source)
+    real_open = Image.open
+    close_calls = 0
+
+    class TrackedImageContext:
+        def __init__(self, path: str | Path) -> None:
+            self.image = real_open(path)
+
+        def __enter__(self) -> Image.Image:
+            return self.image
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            self.image.close()
+
+    monkeypatch.setattr(Image, "open", TrackedImageContext)
+
+    with open_document_page_images(source, dpi=144) as images:
+        (image,) = list(images)
+        assert len(images) == 1
+        assert image.getpixel((0, 0)) == (255, 255, 255)
+
+    assert close_calls == 1
+
+
 def test_single_image_input_stays_on_the_provider_path(tmp_path: Path) -> None:
     source = tmp_path / "image.png"
     Image.new("RGB", (8, 8), "white").save(source)
@@ -196,3 +252,33 @@ def test_single_image_input_stays_on_the_provider_path(tmp_path: Path) -> None:
 
     assert result is None
     assert called is False
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {},
+        {"version": 2, "num_pages": 1, "pages": []},
+        {"version": 1, "num_pages": True, "pages": []},
+        {"version": 1, "num_pages": 0, "pages": []},
+        {"version": 1, "num_pages": 1, "pages": "not-a-list"},
+        {"version": 1, "num_pages": 2, "pages": [{"page_index": 0, "raw_output": {}}]},
+        {"version": 1, "num_pages": 1, "pages": [{"page_index": True, "raw_output": {}}]},
+        {"version": 1, "num_pages": 1, "pages": [{"page_index": 0, "raw_output": []}]},
+    ],
+)
+def test_malformed_multipage_envelopes_are_rejected(envelope: dict[str, object]) -> None:
+    now = datetime.now()
+    raw_result = RawInferenceResult(
+        request=_request(Path("document.pdf")),
+        pipeline=_pipeline(),
+        pipeline_name="test_image_provider",
+        product_type=ProductType.PARSE,
+        raw_output={"_parse_bench_multipage": envelope},
+        started_at=now,
+        completed_at=now,
+        latency_in_ms=1,
+    )
+
+    with pytest.raises(ProviderPermanentError, match="Invalid multipage raw output"):
+        normalize_pdf_pages(raw_result, normalize_single_image=lambda raw: pytest.fail("must not normalize a page"))

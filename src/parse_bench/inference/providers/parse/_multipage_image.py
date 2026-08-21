@@ -12,7 +12,8 @@ already implement page-wise inference should not use it.
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,88 @@ from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, R
 from parse_bench.schemas.product import ProductType
 
 _MULTIPAGE_KEY = "_parse_bench_multipage"
+
+
+class PageImages:
+    """One-shot, bounded-memory collection of document page images."""
+
+    def __init__(self, page_count: int, images: Iterator[Image.Image]) -> None:
+        self._page_count = page_count
+        self._images = images
+
+    def __len__(self) -> int:
+        return self._page_count
+
+    def __iter__(self) -> Iterator[Image.Image]:
+        return self._images
+
+
+@contextmanager
+def open_document_page_images(source_path: str | Path, *, dpi: int) -> Iterator[PageImages]:
+    """Open an image document or incrementally rasterize a PDF.
+
+    PDF pages are inspected up front but rendered one at a time.  The current
+    image is closed before the next page is rendered and also when inference
+    exits early with an exception.
+    """
+
+    path = Path(source_path)
+    if path.suffix.lower() != ".pdf":
+        with Image.open(path) as image:
+            yield PageImages(1, iter((image,)))
+        return
+
+    page_count = _pdf_page_count(path)
+    images = _iter_pdf_page_images(path, dpi=dpi, page_count=page_count)
+    try:
+        yield PageImages(page_count, images)
+    finally:
+        images.close()
+
+
+def _pdf_page_count(source_path: Path) -> int:
+    try:
+        from pdf2image import pdfinfo_from_path
+    except ImportError as exc:
+        raise ProviderConfigError("pdf2image is required to process PDF inputs") from exc
+
+    try:
+        page_count = pdfinfo_from_path(str(source_path)).get("Pages")
+    except Exception as exc:
+        raise ProviderPermanentError(f"Failed to inspect PDF: {exc}") from exc
+
+    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
+        raise ProviderPermanentError(f"No pages found in PDF: {source_path}")
+    return page_count
+
+
+def _iter_pdf_page_images(source_path: Path, *, dpi: int, page_count: int) -> Generator[Image.Image]:
+    try:
+        from pdf2image import convert_from_path
+    except ImportError as exc:
+        raise ProviderConfigError("pdf2image is required to process PDF inputs") from exc
+
+    for page_number in range(1, page_count + 1):
+        try:
+            rendered = convert_from_path(
+                str(source_path),
+                dpi=dpi,
+                first_page=page_number,
+                last_page=page_number,
+            )
+        except Exception as exc:
+            raise ProviderPermanentError(f"Failed to render PDF page {page_number}: {exc}") from exc
+
+        if len(rendered) != 1:
+            for image in rendered:
+                image.close()
+            raise ProviderPermanentError(f"Expected one image for PDF page {page_number}, got {len(rendered)}")
+
+        image = rendered[0]
+        try:
+            yield image
+        finally:
+            image.close()
 
 
 def run_pdf_pages(
@@ -45,42 +128,12 @@ def run_pdf_pages(
     if request.product_type != ProductType.PARSE or source_path.suffix.lower() != ".pdf":
         return None
 
-    try:
-        from pdf2image import convert_from_path, pdfinfo_from_path
-    except ImportError as exc:
-        raise ProviderConfigError("pdf2image is required to process PDF inputs") from exc
-
     started_at = datetime.now()
-    try:
-        page_count = pdfinfo_from_path(str(source_path)).get("Pages")
-    except Exception as exc:
-        raise ProviderPermanentError(f"Failed to inspect PDF: {exc}") from exc
-
-    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
-        raise ProviderPermanentError(f"No pages found in PDF: {source_path}")
-
     page_results: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="parse-bench-pages-") as temp_dir:
-        for page_index in range(page_count):
-            page_number = page_index + 1
-            try:
-                images = convert_from_path(
-                    str(source_path),
-                    dpi=dpi,
-                    first_page=page_number,
-                    last_page=page_number,
-                )
-            except Exception as exc:
-                raise ProviderPermanentError(f"Failed to render PDF page {page_number}: {exc}") from exc
-
-            if len(images) != 1:
-                for image in images:
-                    image.close()
-                raise ProviderPermanentError(f"Expected one image for PDF page {page_number}, got {len(images)}")
-
-            image = images[0]
-            page_path = Path(temp_dir) / f"page-{page_index + 1:06d}.png"
-            try:
+        with open_document_page_images(source_path, dpi=dpi) as images:
+            for page_index, image in enumerate(images):
+                page_path = Path(temp_dir) / f"page-{page_index + 1:06d}.png"
                 _save_png(image, page_path)
                 page_request = request.model_copy(update={"source_file_path": str(page_path)})
                 page_result = run_single_image(pipeline, page_request)
@@ -91,8 +144,6 @@ def run_pdf_pages(
                         "latency_in_ms": page_result.latency_in_ms,
                     }
                 )
-            finally:
-                image.close()
 
     completed_at = datetime.now()
     return RawInferenceResult(
@@ -124,9 +175,18 @@ def normalize_pdf_pages(
     if not isinstance(envelope, dict):
         return None
 
+    if envelope.get("version") != 1:
+        raise ProviderPermanentError("Invalid multipage raw output: unsupported version")
+
+    num_pages = envelope.get("num_pages")
+    if not isinstance(num_pages, int) or isinstance(num_pages, bool) or num_pages < 1:
+        raise ProviderPermanentError("Invalid multipage raw output: 'num_pages' must be a positive integer")
+
     page_records = envelope.get("pages")
     if not isinstance(page_records, list):
         raise ProviderPermanentError("Invalid multipage raw output: 'pages' must be a list")
+    if len(page_records) != num_pages:
+        raise ProviderPermanentError("Invalid multipage raw output: 'num_pages' does not match 'pages'")
 
     pages: list[PageIR] = []
     layout_pages: list[ParseLayoutPageIR] = []
@@ -135,7 +195,7 @@ def normalize_pdf_pages(
             raise ProviderPermanentError(f"Invalid multipage raw output for page {expected_index + 1}")
 
         page_index = record.get("page_index")
-        if page_index != expected_index:
+        if not isinstance(page_index, int) or isinstance(page_index, bool) or page_index != expected_index:
             raise ProviderPermanentError("Invalid multipage raw output: pages must be contiguous and in document order")
 
         single_raw = raw_result.model_copy(update={"raw_output": record["raw_output"]})

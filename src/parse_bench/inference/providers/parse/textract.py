@@ -11,6 +11,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -232,59 +233,49 @@ class TextractProvider(Provider):
         if suffix in {".png", ".jpg", ".jpeg", ".tiff", ".tif"}:
             return self._analyze_document(file_path)
 
-        # For PDFs, convert each page to image and process
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as e:
-            raise ProviderConfigError("pdf2image package not installed. Run: pip install pdf2image") from e
-
-        try:
-            images = convert_from_path(file_path, dpi=300)
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to convert PDF to images: {e}") from e
-
         all_blocks: list[dict[str, Any]] = []
         current_page = 0
 
-        for page_num, image in enumerate(images):
-            # Convert PIL image to bytes, resizing if needed for Textract limits
-            img_bytes = self._resize_image_for_textract(image)
+        with open_document_page_images(path, dpi=300) as images:
+            for page_num, image in enumerate(images):
+                # Convert PIL image to bytes, resizing if needed for Textract limits
+                img_bytes = self._resize_image_for_textract(image)
 
-            # Analyze this page
-            feature_types = ["LAYOUT"]
-            if self._detect_tables:
-                feature_types.append("TABLES")
-            if self._detect_forms:
-                feature_types.append("FORMS")
+                # Analyze this page
+                feature_types = ["LAYOUT"]
+                if self._detect_tables:
+                    feature_types.append("TABLES")
+                if self._detect_forms:
+                    feature_types.append("FORMS")
 
-            try:
-                from botocore.exceptions import ClientError
+                try:
+                    from botocore.exceptions import ClientError
 
-                if feature_types:
-                    response = self._textract_client.analyze_document(
-                        Document={"Bytes": img_bytes},
-                        FeatureTypes=feature_types,
-                    )
-                else:
-                    response = self._textract_client.detect_document_text(Document={"Bytes": img_bytes})
+                    if feature_types:
+                        response = self._textract_client.analyze_document(
+                            Document={"Bytes": img_bytes},
+                            FeatureTypes=feature_types,
+                        )
+                    else:
+                        response = self._textract_client.detect_document_text(Document={"Bytes": img_bytes})
 
-                # Add page number to blocks and accumulate
-                for block in response.get("Blocks", []):
-                    block["Page"] = page_num + 1
-                    all_blocks.append(block)
+                    # Add page number to blocks and accumulate
+                    for block in response.get("Blocks", []):
+                        block["Page"] = page_num + 1
+                        all_blocks.append(block)
 
-                current_page = page_num + 1
+                    current_page = page_num + 1
 
-            except ClientError as e:
-                error_code = e.response.get("Error", {}).get("Code", "")
-                error_message = e.response.get("Error", {}).get("Message", str(e))
+                except ClientError as e:
+                    error_code = e.response.get("Error", {}).get("Code", "")
+                    error_message = e.response.get("Error", {}).get("Message", str(e))
 
-                if error_code in ("ThrottlingException", "ProvisionedThroughputExceededException"):
-                    raise ProviderTransientError(f"Rate limit exceeded: {error_message}") from e
-                elif error_code in ("InvalidParameterException", "UnsupportedDocumentException"):
-                    raise ProviderPermanentError(f"Invalid document: {error_message}") from e
-                else:
-                    raise ProviderTransientError(f"AWS Textract error: {error_message}") from e
+                    if error_code in ("ThrottlingException", "ProvisionedThroughputExceededException"):
+                        raise ProviderTransientError(f"Rate limit exceeded: {error_message}") from e
+                    elif error_code in ("InvalidParameterException", "UnsupportedDocumentException"):
+                        raise ProviderPermanentError(f"Invalid document: {error_message}") from e
+                    else:
+                        raise ProviderTransientError(f"AWS Textract error: {error_message}") from e
 
         return {
             "Blocks": all_blocks,

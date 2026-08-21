@@ -23,6 +23,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
     split_pdf_to_pages,
     swap_gemini_bbox,
 )
+from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
 from parse_bench.inference.providers.parse.google_agentic_vision import (
     GoogleAgenticVisionRunner,
     build_layout_pages_from_agentic_items,
@@ -422,24 +423,6 @@ class GoogleProvider(Provider):
         image.save(buffer, format="JPEG", quality=min_quality)
         return buffer.getvalue()
 
-    def _pdf_to_images(self, pdf_path: str) -> list[Image.Image]:
-        """
-        Convert PDF pages to images.
-
-        :param pdf_path: Path to the PDF file
-        :return: List of PIL Images, one per page
-        """
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as e:
-            raise ProviderConfigError("pdf2image package not installed. Run: pip install pdf2image") from e
-
-        try:
-            images = convert_from_path(pdf_path, dpi=self._dpi)
-            return images
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to convert PDF to images: {e}") from e
-
     @staticmethod
     def _extract_text(response) -> str | None:  # type: ignore[no-untyped-def]
         """Extract text from a Gemini response, or None if empty."""
@@ -774,17 +757,17 @@ class GoogleProvider(Provider):
                     num_pages = 1  # We don't know actual page count in file mode
                 else:
                     # Non-PDF: fall back to image-based parsing
-                    image = Image.open(source_path)
-                    markdown, usage = self._parse_image(image)
-                    page_usages.append(usage)
-                    pages = [
-                        {
-                            "page_index": 0,
-                            "markdown": markdown,
-                            "width": image.width,
-                            "height": image.height,
-                        }
-                    ]
+                    with Image.open(source_path) as image:
+                        markdown, usage = self._parse_image(image)
+                        page_usages.append(usage)
+                        pages = [
+                            {
+                                "page_index": 0,
+                                "markdown": markdown,
+                                "width": image.width,
+                                "height": image.height,
+                            }
+                        ]
                     num_pages = 1
             elif self._mode == "parse_with_layout_file":
                 if source_path.suffix.lower() == ".pdf":
@@ -806,103 +789,95 @@ class GoogleProvider(Provider):
                     num_pages = len(layout_pdf_pages)
                 else:
                     # Non-PDF: fall back to image-based layout parsing
-                    image = Image.open(source_path)
-                    items, raw_content, usage = self._parse_image_with_layout(image)
-                    page_usages.append(usage)
-                    pages = [
-                        {
-                            "page_index": 0,
-                            "items": items,
-                            "raw_content": raw_content,
-                            "width": image.width,
-                            "height": image.height,
-                        }
-                    ]
-                    num_pages = 1
-            elif self._mode == "parse_with_layout_agentic_vision":
-                if source_path.suffix.lower() == ".pdf":
-                    images = self._pdf_to_images(str(source_path))
-                else:
-                    images = [Image.open(source_path)]
-
-                num_pages = len(images)
-                runner = self._build_agentic_vision_runner(expected_page_calls=num_pages)
-                pages = []
-
-                for page_index, image in enumerate(images):  # type: ignore[assignment]
-                    img_bytes = self._image_to_bytes(image)
-
-                    try:
-                        page_result = runner.parse_page(
-                            page_index=page_index,
-                            image=image,
-                            image_bytes=img_bytes,
-                            image_mime_type="image/jpeg",
-                        )
-                        self._annotate_api_calls_with_costs(page_result.api_calls)
-                        page_usages.extend(
-                            call.get("usage", {}) for call in page_result.api_calls if isinstance(call, dict)
-                        )
-                        pages.append(
-                            {
-                                "page_index": page_result.page_index,
-                                "items": page_result.items,
-                                "markdown": page_result.markdown,
-                                "raw_content": page_result.raw_content,
-                                "width": page_result.width,
-                                "height": page_result.height,
-                                "image_mime_type": page_result.image_mime_type,
-                                "thought_summaries": page_result.thought_summaries,
-                                "thought_signatures": page_result.thought_signatures,
-                                "generated_code": page_result.generated_code,
-                                "code_execution_results": page_result.code_execution_results,
-                                "api_calls": page_result.api_calls,
-                            }
-                        )
-                    except (ProviderPermanentError, ProviderTransientError) as exc:
-                        debug_payload = exc.debug_payload if isinstance(exc.debug_payload, dict) else None
-                        if debug_payload is not None:
-                            maybe_calls = debug_payload.get("api_calls", [])
-                            if isinstance(maybe_calls, list):
-                                failed_api_calls = [call for call in maybe_calls if isinstance(call, dict)]
-                                self._annotate_api_calls_with_costs(failed_api_calls)
-                                page_usages.extend(call.get("usage", {}) for call in failed_api_calls)
-                                debug_payload["api_calls"] = failed_api_calls
-                        raise
-            else:
-                # Image mode (both "image" and "parse_with_layout"):
-                # convert PDF to images and process each page
-                if source_path.suffix.lower() == ".pdf":
-                    images = self._pdf_to_images(str(source_path))
-                else:
-                    images = [Image.open(source_path)]
-
-                pages = []
-                for page_index, image in enumerate(images):  # type: ignore[assignment]
-                    if self._mode == "parse_with_layout":
+                    with Image.open(source_path) as image:
                         items, raw_content, usage = self._parse_image_with_layout(image)
                         page_usages.append(usage)
-                        pages.append(
+                        pages = [
                             {
-                                "page_index": page_index,
+                                "page_index": 0,
                                 "items": items,
                                 "raw_content": raw_content,
                                 "width": image.width,
                                 "height": image.height,
                             }
-                        )
-                    else:
-                        markdown, usage = self._parse_image(image)
-                        page_usages.append(usage)
-                        pages.append(
-                            {
-                                "page_index": page_index,
-                                "markdown": markdown,
-                                "width": image.width,
-                                "height": image.height,
-                            }
-                        )
-                num_pages = len(images)
+                        ]
+                    num_pages = 1
+            elif self._mode == "parse_with_layout_agentic_vision":
+                pages = []
+                with open_document_page_images(source_path, dpi=self._dpi) as images:
+                    num_pages = len(images)
+                    runner = self._build_agentic_vision_runner(expected_page_calls=num_pages)
+
+                    for page_index, image in enumerate(images):
+                        img_bytes = self._image_to_bytes(image)
+
+                        try:
+                            page_result = runner.parse_page(
+                                page_index=page_index,
+                                image=image,
+                                image_bytes=img_bytes,
+                                image_mime_type="image/jpeg",
+                            )
+                            self._annotate_api_calls_with_costs(page_result.api_calls)
+                            page_usages.extend(
+                                call.get("usage", {}) for call in page_result.api_calls if isinstance(call, dict)
+                            )
+                            pages.append(
+                                {
+                                    "page_index": page_result.page_index,
+                                    "items": page_result.items,
+                                    "markdown": page_result.markdown,
+                                    "raw_content": page_result.raw_content,
+                                    "width": page_result.width,
+                                    "height": page_result.height,
+                                    "image_mime_type": page_result.image_mime_type,
+                                    "thought_summaries": page_result.thought_summaries,
+                                    "thought_signatures": page_result.thought_signatures,
+                                    "generated_code": page_result.generated_code,
+                                    "code_execution_results": page_result.code_execution_results,
+                                    "api_calls": page_result.api_calls,
+                                }
+                            )
+                        except (ProviderPermanentError, ProviderTransientError) as exc:
+                            debug_payload = exc.debug_payload if isinstance(exc.debug_payload, dict) else None
+                            if debug_payload is not None:
+                                maybe_calls = debug_payload.get("api_calls", [])
+                                if isinstance(maybe_calls, list):
+                                    failed_api_calls = [call for call in maybe_calls if isinstance(call, dict)]
+                                    self._annotate_api_calls_with_costs(failed_api_calls)
+                                    page_usages.extend(call.get("usage", {}) for call in failed_api_calls)
+                                    debug_payload["api_calls"] = failed_api_calls
+                            raise
+            else:
+                # Image mode (both "image" and "parse_with_layout"):
+                # convert PDF to images and process each page
+                pages = []
+                with open_document_page_images(source_path, dpi=self._dpi) as images:
+                    for page_index, image in enumerate(images):
+                        if self._mode == "parse_with_layout":
+                            items, raw_content, usage = self._parse_image_with_layout(image)
+                            page_usages.append(usage)
+                            pages.append(
+                                {
+                                    "page_index": page_index,
+                                    "items": items,
+                                    "raw_content": raw_content,
+                                    "width": image.width,
+                                    "height": image.height,
+                                }
+                            )
+                        else:
+                            markdown, usage = self._parse_image(image)
+                            page_usages.append(usage)
+                            pages.append(
+                                {
+                                    "page_index": page_index,
+                                    "markdown": markdown,
+                                    "width": image.width,
+                                    "height": image.height,
+                                }
+                            )
+                    num_pages = len(images)
 
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)
