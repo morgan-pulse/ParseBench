@@ -3220,9 +3220,7 @@ class KdlFrontierNanoProvider(Provider):
 
         with document:
             if document.page_count > self._max_pages:
-                raise ProviderPermanentError(
-                    f"Document has {document.page_count} pages > max_pages={self._max_pages}."
-                )
+                raise ProviderPermanentError(f"Document has {document.page_count} pages > max_pages={self._max_pages}.")
             if document.page_count < 1:
                 raise ProviderPermanentError("Document rendered to zero pages.")
             images = self._iter_page_images(document, mat)
@@ -3243,24 +3241,18 @@ class KdlFrontierNanoProvider(Provider):
             except Exception as exc:
                 if image is not None:
                     image.close()
-                raise ProviderPermanentError(
-                    f"Failed to render document page {page_number}: {exc}"
-                ) from exc
+                raise ProviderPermanentError(f"Failed to render document page {page_number}: {exc}") from exc
             try:
                 yield image
             finally:
                 image.close()
 
-    def run_inference(
-        self, pipeline: PipelineSpec, request: InferenceRequest
-    ) -> RawInferenceResult:
+    def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
         source_path = Path(request.source_file_path)
         if not source_path.exists():
             raise ProviderPermanentError(f"Source file not found: {source_path}")
         started_at = datetime.now()
-        engine = _NanoEngine(
-            self._endpoint_url, self._model, self._max_concurrent, self._timeout
-        )
+        engine = _NanoEngine(self._endpoint_url, self._model, self._max_concurrent, self._timeout)
         try:
             with self._open_page_images(source_path) as page_images:
                 raw_output = self.run_async_from_sync(engine.parse_pages(page_images))
