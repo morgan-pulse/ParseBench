@@ -334,6 +334,8 @@ def test_kdl_streams_pdf_pages_in_order_and_closes_owned_images(
     ) -> list[dict[str, object]]:
         assert image.mode == "RGB"
         events.append(("infer", page_number))
+        if page_number == 2:
+            return []
         return [
             {
                 "category": "Text",
@@ -348,7 +350,14 @@ def test_kdl_streams_pdf_pages_in_order_and_closes_owned_images(
 
     raw_result = _provider().run_inference(_pipeline(), _request(source))
 
-    assert raw_result.raw_output["markdown"] == "page 1\n\n---\n\n**Page 2**\n\npage 2\n\n---\n\n**Page 3**\n\npage 3"
+    assert raw_result.raw_output["markdown"] == ("page 1\n\n---\n\n**Page 2**\n\n---\n\n**Page 3**\n\npage 3")
+    assert [page["page_number"] for page in raw_result.raw_output["pages"]] == [1, 2, 3]
+    assert [page["page_number"] for page in raw_result.raw_output["markdown_pages"]] == [1, 2, 3]
+    assert raw_result.raw_output["pages"][1]["elements"] == []
+    assert raw_result.raw_output["markdown_pages"][1]["content"] == ""
+    normalized_result = _provider().normalize(raw_result)
+    assert [page.page_index for page in normalized_result.output.pages] == [0, 1, 2]
+    assert [page.page_number for page in normalized_result.output.layout_pages] == [1, 2, 3]
     assert events == [
         ("render", 1),
         ("infer", 1),
@@ -361,6 +370,53 @@ def test_kdl_streams_pdf_pages_in_order_and_closes_owned_images(
     assert len(opened) == len(normalized) == 3
     for image in [*opened, *normalized]:
         _assert_closed(image)
+
+
+def test_kdl_non_native_layout_aborts_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
+
+    async def non_native_layout(*args: object, **kwargs: object) -> str:
+        return "diagnostic response instead of layout tokens"
+
+    monkeypatch.setattr(kdl, "_nano_chat", non_native_layout)
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    with Image.new("RGB", (64, 64), "white") as image:
+        with pytest.raises(ProviderPermanentError, match="non-native layout response"):
+            asyncio.run(engine._parse_page(object(), asyncio.Semaphore(1), image, 2))
+
+
+@pytest.mark.parametrize("failure_stage", ["crop", "preprocess"])
+def test_kdl_crop_or_preprocess_failure_is_classified(failure_stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    with Image.new("RGB", (64, 64), "white") as image:
+        if failure_stage == "crop":
+            monkeypatch.setattr(
+                Image.Image,
+                "crop",
+                lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("crop failed")),
+            )
+        else:
+            monkeypatch.setattr(
+                kdl,
+                "preprocess_for_vlm",
+                lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("preprocess failed")),
+            )
+
+        with pytest.raises(
+            ProviderPermanentError,
+            match=f"Failed to crop or preprocess layout item 0: {failure_stage} failed",
+        ):
+            kdl._nano_group_by_bucket(
+                [
+                    {
+                        "category": "Text",
+                        "bbox": [0.0, 0.0, 0.5, 0.5],
+                        "layout_order": 0,
+                        "page_number": 1,
+                    }
+                ],
+                image,
+                lambda derived: derived,
+            )
 
 
 @pytest.mark.parametrize(

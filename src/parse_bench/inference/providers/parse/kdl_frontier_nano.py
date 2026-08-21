@@ -33,6 +33,7 @@ Most of this file is vendored verbatim from the (closed-source) KDL DeepParser
 orchestrator so the maintainers can reproduce the submitted numbers end to end;
 section banners mark the vendored module boundaries.
 """
+
 import asyncio
 import base64
 import enum
@@ -119,6 +120,7 @@ class ElementCategory(str, Enum):
     # 수학 요소
     FORMULA = "Formula"
 
+
 # ==========================================================================
 # [vendored] recognition_contract
 # ==========================================================================
@@ -178,6 +180,7 @@ def _category_value(category: str | ElementCategory) -> str:
         return category.value
     return str(category).strip()
 
+
 # ==========================================================================
 # [vendored] layout_contract
 # ==========================================================================
@@ -207,9 +210,7 @@ CANONICAL_LAYOUT_CATEGORIES = (
 
 DEFAULT_LAYOUT_CATEGORY = ElementCategory.TEXT.value
 
-_CANONICAL_BY_CASEFOLD = {
-    category.casefold(): category for category in CANONICAL_LAYOUT_CATEGORIES
-}
+_CANONICAL_BY_CASEFOLD = {category.casefold(): category for category in CANONICAL_LAYOUT_CATEGORIES}
 
 
 def normalize_layout_category(
@@ -235,11 +236,7 @@ def _map_provider_category(
     if not provider_category_map:
         return category
 
-    return (
-        provider_category_map.get(category)
-        or provider_category_map.get(category.casefold())
-        or category
-    )
+    return provider_category_map.get(category) or provider_category_map.get(category.casefold()) or category
 
 
 def _canonicalize_category(category: Any) -> str:
@@ -253,6 +250,7 @@ def _stringify_category(category: Any) -> str:
     if category is None:
         return ""
     return str(category).strip()
+
 
 # ==========================================================================
 # [vendored] image_preprocessing
@@ -345,10 +343,7 @@ def calculate_dimensions(
     # 종횡비 검증
     aspect_ratio = max(height, width) / min(height, width)
     if aspect_ratio > ImageConfig.MAX_ASPECT_RATIO:
-        raise ValueError(
-            f"종횡비가 너무 큽니다. 최대 {ImageConfig.MAX_ASPECT_RATIO}:1, "
-            f"현재 {aspect_ratio:.1f}:1"
-        )
+        raise ValueError(f"종횡비가 너무 큽니다. 최대 {ImageConfig.MAX_ASPECT_RATIO}:1, 현재 {aspect_ratio:.1f}:1")
 
     # factor의 배수로 조정
     target_height = max(factor, _round_by_factor(height, factor))
@@ -369,12 +364,8 @@ def calculate_dimensions(
         # 확대 후 최대 픽셀 수 재검사
         if target_height * target_width > max_pixels:
             scale = math.sqrt((target_height * target_width) / max_pixels)
-            target_height = max(
-                factor, _floor_by_factor(int(target_height / scale), factor)
-            )
-            target_width = max(
-                factor, _floor_by_factor(int(target_width / scale), factor)
-            )
+            target_height = max(factor, _floor_by_factor(int(target_height / scale), factor))
+            target_width = max(factor, _floor_by_factor(int(target_width / scale), factor))
 
     return target_width, target_height
 
@@ -646,9 +637,7 @@ def prepare_native_layout_image(image: Image.Image) -> Image.Image:
 def parse_native_raw_layout_tokens(content: str) -> list[NativeLayoutItem]:
     items: list[NativeLayoutItem] = []
     for match in _NATIVE_LAYOUT_RE.finditer(content):
-        converted_bbox = _convert_native_layout_bbox(
-            (match.group(1), match.group(2), match.group(3), match.group(4))
-        )
+        converted_bbox = _convert_native_layout_bbox((match.group(1), match.group(2), match.group(3), match.group(4)))
         if converted_bbox is None:
             continue
 
@@ -680,24 +669,19 @@ def normalize_native_layout_items(
     list_containers = [
         item
         for item in raw_items
-        if item.raw_category == "list"
-        and _has_contained_child(item, raw_items, _LIST_CHILD_CATEGORIES)
+        if item.raw_category == "list" and _has_contained_child(item, raw_items, _LIST_CHILD_CATEGORIES)
     ]
     image_blocks = [
         item
         for item in raw_items
-        if item.raw_category == "image_block"
-        and _has_contained_child(item, raw_items, _IMAGE_BLOCK_CHILD_CATEGORIES)
+        if item.raw_category == "image_block" and _has_contained_child(item, raw_items, _IMAGE_BLOCK_CHILD_CATEGORIES)
     ]
-    equation_blocks = [
-        item for item in raw_items if item.raw_category == "equation_block"
-    ]
+    equation_blocks = [item for item in raw_items if item.raw_category == "equation_block"]
     equation_child_orders = {
         child.layout_order
         for block in equation_blocks
         for child in raw_items
-        if child.raw_category in _EQUATION_CHILD_CATEGORIES
-        and _bbox_contains(block.bbox, child.bbox)
+        if child.raw_category in _EQUATION_CHILD_CATEGORIES and _bbox_contains(block.bbox, child.bbox)
     }
 
     normalized_items: list[NormalizedNativeLayoutItem] = []
@@ -717,8 +701,7 @@ def normalize_native_layout_items(
             children = [
                 _attachment_from_raw_item(child)
                 for child in raw_items
-                if child.raw_category in _EQUATION_CHILD_CATEGORIES
-                and _bbox_contains(item.bbox, child.bbox)
+                if child.raw_category in _EQUATION_CHILD_CATEGORIES and _bbox_contains(item.bbox, child.bbox)
             ]
             if children:
                 metadata["children"] = children
@@ -772,8 +755,7 @@ def _convert_native_layout_bbox(
 
 def _category_for_item(item: NativeLayoutItem, metadata: dict[str, Any]) -> str:
     if item.raw_category in _LIST_CHILD_CATEGORIES and (
-        item.raw_category in {"list_item", "ref_text"}
-        or metadata.get("parent_raw_category") == "list"
+        item.raw_category in {"list_item", "ref_text"} or metadata.get("parent_raw_category") == "list"
     ):
         return "List-item"
     return normalize_layout_category(item.raw_category, NATIVE_LAYOUT_CATEGORY_MAP)
@@ -821,8 +803,7 @@ def _find_containing_parent(
     candidates = [
         parent
         for parent in parents
-        if parent.layout_order != item.layout_order
-        and _bbox_contains(parent.bbox, item.bbox)
+        if parent.layout_order != item.layout_order and _bbox_contains(parent.bbox, item.bbox)
     ]
     return min(candidates, key=lambda parent: _bbox_area(parent.bbox), default=None)
 
@@ -867,14 +848,8 @@ def _attach_caption_and_footnote_refs(
         if parent is None:
             continue
 
-        key = (
-            "attached_footnotes"
-            if item.raw_category.endswith("_footnote")
-            else "attached_captions"
-        )
-        parent.metadata.setdefault(key, []).append(
-            _attachment_from_normalized_item(item)
-        )
+        key = "attached_footnotes" if item.raw_category.endswith("_footnote") else "attached_captions"
+        parent.metadata.setdefault(key, []).append(_attachment_from_normalized_item(item))
         item.metadata.update(
             {
                 "attached_to_raw_category": parent.raw_category,
@@ -893,8 +868,7 @@ def _find_nearest_attachment_parent(
     candidates = [
         candidate
         for candidate in items
-        if candidate.layout_order != item.layout_order
-        and candidate.raw_category in parent_raw_categories
+        if candidate.layout_order != item.layout_order and candidate.raw_category in parent_raw_categories
     ]
     return min(
         candidates,
@@ -919,6 +893,7 @@ def _attachment_distance(
         vertical_gap = 0.0
 
     return vertical_gap + horizontal_gap
+
 
 # ==========================================================================
 # [vendored] otsl_converter
@@ -1057,9 +1032,7 @@ OTSL_UCEL = "<ucel>"
 OTSL_XCEL = "<xcel>"
 
 NON_CAPTURING_TAG_GROUP = "(?:<fcel>|<ecel>|<nl>|<lcel>|<ucel>|<xcel>)"
-OTSL_FIND_PATTERN = re.compile(
-    f"{NON_CAPTURING_TAG_GROUP}.*?(?={NON_CAPTURING_TAG_GROUP}|$)", flags=re.DOTALL
-)
+OTSL_FIND_PATTERN = re.compile(f"{NON_CAPTURING_TAG_GROUP}.*?(?={NON_CAPTURING_TAG_GROUP}|$)", flags=re.DOTALL)
 IGNORABLE_OTSL_TAIL_PATTERN = re.compile(
     r"(?:\s|<br\s*/?>|<nl>|</otsl>)+",
     flags=re.IGNORECASE,
@@ -1076,20 +1049,14 @@ def otsl_extract_tokens_and_text(s: str) -> Tuple[List[str], List[str]]:
     Returns:
         Tuple[List[str], List[str]]: (tokens, text_parts)
     """
-    pattern = (
-        r"("
-        + r"|".join([OTSL_NL, OTSL_FCEL, OTSL_ECEL, OTSL_LCEL, OTSL_UCEL, OTSL_XCEL])
-        + r")"
-    )
+    pattern = r"(" + r"|".join([OTSL_NL, OTSL_FCEL, OTSL_ECEL, OTSL_LCEL, OTSL_UCEL, OTSL_XCEL]) + r")"
     tokens = re.findall(pattern, s)
     text_parts = re.split(pattern, s)
     text_parts = [token for token in text_parts if token.strip()]
     return tokens, text_parts
 
 
-def otsl_parse_texts(
-    texts: List[str], tokens: List[str]
-) -> Tuple[List[TableCell], List[List[str]]]:
+def otsl_parse_texts(texts: List[str], tokens: List[str]) -> Tuple[List[TableCell], List[List[str]]]:
     """
     Parse OTSL text and tags into TableCell objects and tag structure.
 
@@ -1101,11 +1068,7 @@ def otsl_parse_texts(
         Tuple[List[TableCell], List[List[str]]]: (table_cells, split_row_tokens)
     """
     split_word = OTSL_NL
-    split_row_tokens = [
-        list(y)
-        for x, y in itertools.groupby(tokens, lambda z: z == split_word)
-        if not x
-    ]
+    split_row_tokens = [list(y) for x, y in itertools.groupby(tokens, lambda z: z == split_word) if not x]
     table_cells: List[TableCell] = []
     r_idx = 0
     c_idx = 0
@@ -1138,9 +1101,7 @@ def otsl_parse_texts(
                 text_idx += 1
         texts = new_texts
 
-    def count_right(
-        tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]
-    ) -> int:
+    def count_right(tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]) -> int:
         span = 0
         c_idx_iter = c_idx
         while tokens[r_idx][c_idx_iter] in which_tokens:
@@ -1150,9 +1111,7 @@ def otsl_parse_texts(
                 return span
         return span
 
-    def count_down(
-        tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]
-    ) -> int:
+    def count_down(tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]) -> int:
         span = 0
         r_idx_iter = r_idx
         while tokens[r_idx_iter][c_idx] in which_tokens:
@@ -1172,22 +1131,16 @@ def otsl_parse_texts(
                 cell_text = texts[i + 1]
                 right_offset = 2
 
-            next_right_cell = (
-                texts[i + right_offset] if i + right_offset < len(texts) else ""
-            )
+            next_right_cell = texts[i + right_offset] if i + right_offset < len(texts) else ""
             next_bottom_cell = ""
             if r_idx + 1 < len(split_row_tokens):
                 if c_idx < len(split_row_tokens[r_idx + 1]):
                     next_bottom_cell = split_row_tokens[r_idx + 1][c_idx]
 
             if next_right_cell in [OTSL_LCEL, OTSL_XCEL]:
-                col_span += count_right(
-                    split_row_tokens, c_idx + 1, r_idx, [OTSL_LCEL, OTSL_XCEL]
-                )
+                col_span += count_right(split_row_tokens, c_idx + 1, r_idx, [OTSL_LCEL, OTSL_XCEL])
             if next_bottom_cell in [OTSL_UCEL, OTSL_XCEL]:
-                row_span += count_down(
-                    split_row_tokens, c_idx, r_idx + 1, [OTSL_UCEL, OTSL_XCEL]
-                )
+                row_span += count_down(split_row_tokens, c_idx, r_idx + 1, [OTSL_UCEL, OTSL_XCEL])
 
             table_cells.append(
                 TableCell(
@@ -1273,9 +1226,7 @@ def otsl_pad_to_sqr_v2(otsl_str: str) -> str:
         for i, cell_str in enumerate(raw_cells):
             if cell_str.startswith(OTSL_FCEL):
                 min_len = i + 1
-        row_data.append(
-            {"raw_cells": raw_cells, "total_len": total_len, "min_len": min_len}
-        )
+        row_data.append({"raw_cells": raw_cells, "total_len": total_len, "min_len": min_len})
     if not row_data:
         return OTSL_NL
     global_min_width = max(row["min_len"] for row in row_data) if row_data else 0
@@ -1327,9 +1278,7 @@ def convert_otsl_to_html(otsl_content: str) -> str:
     return export_to_html(table_data)
 
 
-def _collapse_placeholder_with_ignorable_tail(
-    otsl_content: str, placeholders: List[str]
-) -> str:
+def _collapse_placeholder_with_ignorable_tail(otsl_content: str, placeholders: List[str]) -> str:
     stripped = otsl_content.strip()
     for placeholder in placeholders:
         if stripped == placeholder:
@@ -1344,9 +1293,7 @@ def _collapse_placeholder_with_ignorable_tail(
 _OTSL_STRUCTURAL_TAG_RE = re.compile(r"<(?:otsl|fcel|ecel|lcel|ucel|xcel)>")
 
 
-def _flatten_top_level_table_placeholders(
-    otsl_content: str, placeholder_to_html: Dict[str, str]
-) -> str | None:
+def _flatten_top_level_table_placeholders(otsl_content: str, placeholder_to_html: Dict[str, str]) -> str | None:
     """If the top level is one or more table placeholders plus only non-OTSL
     text (sibling tables and/or a the model-appended caption/note after
     ``</otsl>``), return the concatenated HTML of those tables in order of
@@ -1435,9 +1382,7 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
         placeholder_to_otsl[placeholder] = inner_otsl
 
         # 원본에서 해당 블록을 placeholder로 치환
-        otsl_content = (
-            otsl_content[: match.start()] + placeholder + otsl_content[match.end() :]
-        )
+        otsl_content = otsl_content[: match.start()] + placeholder + otsl_content[match.end() :]
         iteration += 1
 
     if debug:
@@ -1446,9 +1391,7 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
 
     # 최상위 <otsl> 태그 제거
     otsl_content = re.sub(r"^<otsl>|</otsl>$", "", otsl_content.strip())
-    otsl_content = _collapse_placeholder_with_ignorable_tail(
-        otsl_content, list(placeholder_to_otsl)
-    )
+    otsl_content = _collapse_placeholder_with_ignorable_tail(otsl_content, list(placeholder_to_otsl))
 
     # 2단계: 모든 레벨의 OTSL을 HTML로 변환 (placeholder 포함된 채로)
     placeholder_to_html: Dict[str, str] = {}
@@ -1458,15 +1401,11 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
             inner_html = convert_otsl_to_html(otsl)
             placeholder_to_html[placeholder] = inner_html
             if debug:
-                logger.debug(
-                    f"Converted {placeholder[:30]}... to HTML: {inner_html[:80]}..."
-                )
+                logger.debug(f"Converted {placeholder[:30]}... to HTML: {inner_html[:80]}...")
         except Exception as e:
             placeholder_to_html[placeholder] = "<table></table>"
             if debug:
-                logger.error(
-                    "OTSL conversion failed", placeholder=placeholder, error=str(e)
-                )
+                logger.error("OTSL conversion failed", placeholder=placeholder, error=str(e))
 
     # 최상위 레벨도 HTML로 변환
     top_stripped = otsl_content.strip()
@@ -1523,7 +1462,9 @@ if __name__ == "__main__":
     print()
 
     # 간단한 중첩 테이블 테스트
-    simple_nested = "<otsl><fcel>Outer A<fcel><otsl><fcel>Inner 1<fcel>Inner 2<nl></otsl><nl><fcel>Outer B<fcel>Outer C<nl></otsl>"
+    simple_nested = (
+        "<otsl><fcel>Outer A<fcel><otsl><fcel>Inner 1<fcel>Inner 2<nl></otsl><nl><fcel>Outer B<fcel>Outer C<nl></otsl>"
+    )
     print("=== Simple nested (v2) ===")
     print(convert_otsl_to_html_v2(simple_nested, debug=True))
 
@@ -1555,9 +1496,7 @@ def find_shortest_repeating_substring(s: str) -> Union[str, None]:
     return None
 
 
-def find_repeating_suffix(
-    s: str, min_len: int = 8, min_repeats: int = 5
-) -> Union[Tuple[str, str, int], None]:
+def find_repeating_suffix(s: str, min_len: int = 8, min_repeats: int = 5) -> Union[Tuple[str, str, int], None]:
     """
     Detect if string ends with a repeating phrase.
 
@@ -1708,10 +1647,7 @@ def truncate_repetitive_content(
             return candidate if len(candidate) < len(normalized) else line
 
         # 줄 단위로 처리해 줄바꿈 구조를 보존한다 (n-gram 반복은 줄 내부 구문 루프가 대상).
-        content = "\n".join(
-            _dedup_ngrams(line) if line.strip() else line
-            for line in content.split("\n")
-        )
+        content = "\n".join(_dedup_ngrams(line) if line.strip() else line for line in content.split("\n"))
         stripped_content = content.strip()
 
     # Priority 0: Remove long sequences of separator/symbol characters
@@ -1763,6 +1699,7 @@ def truncate_repetitive_content(
 
     return content
 
+
 # ==========================================================================
 # [vendored] picture_response_validator
 # ==========================================================================
@@ -1778,9 +1715,7 @@ from decimal import Decimal
 # [vendor-strip] from loguru import logger
 
 _SEPARATOR_PATTERN = re.compile(r"^\s*\|(?:\s*:?-+:?\s*\|)+\s*$")
-_KRW_EXPR_PATTERN = re.compile(
-    r"(?P<expr>(?:\d[\d,]*\s*(?:조원|억원|만원|조|억|만|원)\s*)+)"
-)
+_KRW_EXPR_PATTERN = re.compile(r"(?P<expr>(?:\d[\d,]*\s*(?:조원|억원|만원|조|억|만|원)\s*)+)")
 _KRW_SEGMENT_PATTERN = re.compile(r"(\d[\d,]*)\s*(조원|억원|만원|조|억|만|원)")
 
 _KRW_UNIT_MULTIPLIERS = {
@@ -1826,9 +1761,7 @@ def normalize_markdown_table_content(content: str) -> str:
 
     normalized = content.replace("｜", "|")
     lines = normalized.splitlines()
-    table_line_indices = [
-        idx for idx, line in enumerate(lines) if line.strip().startswith("|")
-    ]
+    table_line_indices = [idx for idx, line in enumerate(lines) if line.strip().startswith("|")]
 
     if len(table_line_indices) < 2:
         return normalized
@@ -1836,9 +1769,7 @@ def normalize_markdown_table_content(content: str) -> str:
     first_idx = table_line_indices[0]
     header_line = lines[first_idx].strip()
 
-    if first_idx + 1 < len(lines) and _SEPARATOR_PATTERN.match(
-        lines[first_idx + 1].strip()
-    ):
+    if first_idx + 1 < len(lines) and _SEPARATOR_PATTERN.match(lines[first_idx + 1].strip()):
         return normalized
 
     header_cells = split_markdown_table_row(header_line)
@@ -1987,12 +1918,8 @@ def merge_translated_table_with_source_values(
     translated = normalize_markdown_table_content(translated_content)
     source = normalize_chart_table_currency_values(source_content)
 
-    translated_lines = [
-        line for line in translated.splitlines() if line.strip().startswith("|")
-    ]
-    source_lines = [
-        line for line in source.splitlines() if line.strip().startswith("|")
-    ]
+    translated_lines = [line for line in translated.splitlines() if line.strip().startswith("|")]
+    source_lines = [line for line in source.splitlines() if line.strip().startswith("|")]
 
     if len(translated_lines) < 3 or len(translated_lines) != len(source_lines):
         return translated
@@ -2007,9 +1934,7 @@ def merge_translated_table_with_source_values(
         return translated
 
     merged_rows: list[list[str]] = []
-    for row_idx, (translated_row, source_row) in enumerate(
-        zip(translated_rows, source_rows)
-    ):
+    for row_idx, (translated_row, source_row) in enumerate(zip(translated_rows, source_rows)):
         if row_idx == 1:
             merged_rows.append(["---"] * len(translated_rows[0]))
             continue
@@ -2116,12 +2041,8 @@ def is_valid_markdown_table(content: str) -> bool:
 
 import html as _html
 
-_NATIVE_CLASS_PATTERN = re.compile(
-    r"<\|class_start\|>\s*(?P<cls>[^<|]*?)\s*<\|class_end\|>", re.S
-)
-_NATIVE_CONTENT_PATTERN = re.compile(
-    r"<\|content_start\|>(?P<body>.*?)<\|content_end\|>", re.S
-)
+_NATIVE_CLASS_PATTERN = re.compile(r"<\|class_start\|>\s*(?P<cls>[^<|]*?)\s*<\|class_end\|>", re.S)
+_NATIVE_CONTENT_PATTERN = re.compile(r"<\|content_start\|>(?P<body>.*?)<\|content_end\|>", re.S)
 _NATIVE_TOKEN_PATTERN = re.compile(r"<\|[^|>]*\|>")
 
 
@@ -2164,6 +2085,7 @@ def parse_native_chart_tokens(content):
     table = re.sub(r"^!\[", "", table.strip()).rstrip("]").strip()
     return image_type, table
 
+
 # ==========================================================================
 # [vendored] table_processor(functions)
 # ==========================================================================
@@ -2188,11 +2110,7 @@ from typing import Match
 
 def looks_like_otsl(content: str) -> bool:
     """Return True when table content starts with wrapped or bare OTSL tokens."""
-    return bool(
-        content.lstrip().startswith(
-            ("<otsl>", "<fcel>", "<ecel>", "<lcel>", "<ucel>", "<xcel>", "<nl>")
-        )
-    )
+    return bool(content.lstrip().startswith(("<otsl>", "<fcel>", "<ecel>", "<lcel>", "<ucel>", "<xcel>", "<nl>")))
 
 
 def looks_like_html_table(content: str) -> bool:
@@ -2204,9 +2122,7 @@ def looks_like_html_table(content: str) -> bool:
     # Relax detection for serialized/escaped table strings such as:
     # "\"<table ...>\"" or "<table rowspan=\\\"2\\\">".
     lowered = stripped.lower()
-    return "<table" in lowered and any(
-        marker in lowered for marker in ("rowspan", "colspan", "<tr", "<td")
-    )
+    return "<table" in lowered and any(marker in lowered for marker in ("rowspan", "colspan", "<tr", "<td"))
 
 
 def normalize_span_attributes(content: str) -> str:
@@ -2296,12 +2212,9 @@ def remove_dots_from_html_cells(html_content: str) -> str:
         return f"<td{attrs}>{td_content}</td>"
 
     # <td>...</td> 패턴을 찾아서 처리 (태그 속성도 고려)
-    result = re.sub(
-        r"<td([^>]*)>(.*?)</td>", clean_dots_in_td, html_content, flags=re.DOTALL
-    )
+    result = re.sub(r"<td([^>]*)>(.*?)</td>", clean_dots_in_td, html_content, flags=re.DOTALL)
 
     return result
-
 
 
 # ==========================================================================
@@ -2375,7 +2288,6 @@ def normalize_inline_markdown_table(content: str) -> str:
         rows.append(row)
 
     return "\n".join(rows) if len(rows) >= 2 else normalized
-
 
 
 # ==========================================================================
@@ -2461,8 +2373,14 @@ def header_mark(md: str) -> str:
 # Rule 2: curly-quote fold  (port of wf_rule_4_transform.fold_md)
 # --------------------------------------------------------------------------------------
 _QUOTE_FOLD = {
-    "‘": "'", "’": "'", "‚": "'", "‛": "'",   # single quotes
-    "“": '"', "”": '"', "„": '"', "‟": '"',   # double quotes
+    "‘": "'",
+    "’": "'",
+    "‚": "'",
+    "‛": "'",  # single quotes
+    "“": '"',
+    "”": '"',
+    "„": '"',
+    "‟": '"',  # double quotes
 }
 _QUOTE_TABLE = str.maketrans(_QUOTE_FOLD)
 
@@ -2600,6 +2518,7 @@ def postprocess_markdown(md: str, *, title_variant: str = "aggressive") -> str:
         pass
     return md
 
+
 # ==========================================================================
 # [core] KDL-Frontier-Parser-nano orchestration
 # ==========================================================================
@@ -2670,8 +2589,14 @@ _NANO_LOSSLESS_STAGES = {"table"}
 
 _TEXT_BUCKET_CATEGORIES = {
     # TextElementPostProcessor.TEXT_CATEGORIES (n-gram repetition cleanup)
-    "Title", "Section-header", "Text", "Page-header",
-    "Page-footer", "List-item", "Caption", "Footnote",
+    "Title",
+    "Section-header",
+    "Text",
+    "Page-header",
+    "Page-footer",
+    "List-item",
+    "Caption",
+    "Footnote",
 }
 
 _BLOCKQUOTE_CATEGORIES = {"Caption", "Footnote", "Page-header", "Page-footer"}
@@ -2680,11 +2605,7 @@ _BLOCKQUOTE_CATEGORIES = {"Caption", "Footnote", "Page-header", "Page-footer"}
 def _nano_image_to_data_uri(image: Image.Image, *, lossless: bool = False) -> str:
     """Port of message_builder.image_to_bytes + base64 data-URI encoding."""
     buffered = io.BytesIO()
-    if (
-        lossless
-        or image.mode in ("RGBA", "LA")
-        or (image.mode == "P" and "transparency" in image.info)
-    ):
+    if lossless or image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
         mime_type = "image/png"
         image.save(buffered, format="PNG")
     else:
@@ -2707,20 +2628,14 @@ def _nano_payload(stage: str, model: str, image: Image.Image) -> dict:
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": _nano_image_to_data_uri(
-                                image, lossless=stage in _NANO_LOSSLESS_STAGES
-                            )
-                        },
+                        "image_url": {"url": _nano_image_to_data_uri(image, lossless=stage in _NANO_LOSSLESS_STAGES)},
                     },
                     {"type": "text", "text": _NANO_PROMPTS[stage]},
                 ],
             }
         ],
         "temperature": 0.0,
-        "max_tokens": int(
-            os.getenv(_NANO_MAX_TOKENS_ENV[stage][0], str(_NANO_MAX_TOKENS_ENV[stage][1]))
-        ),
+        "max_tokens": int(os.getenv(_NANO_MAX_TOKENS_ENV[stage][0], str(_NANO_MAX_TOKENS_ENV[stage][1]))),
     }
     extra = _NANO_EXTRA_PAYLOAD[stage]
     if extra is not None:
@@ -2775,12 +2690,12 @@ def _nano_group_by_bucket(
         "formula": [],
     }
     im_w, im_h = original_image.size
-    for item in content:
+    for item_index, item in enumerate(content):
         cat = item.get("category", "Text")
         mapped_cat = layout_recognition_bucket(cat)
         bbox = item.get("bbox", [])
         if not bbox or len(bbox) != 4:
-            continue
+            raise ProviderPermanentError(f"Malformed layout item {item_index}: expected a four-coordinate bbox")
         try:
             x1, y1, x2, y2 = bbox
             left = int(round(x1 * im_w))
@@ -2799,8 +2714,10 @@ def _nano_group_by_bucket(
             preprocessed_img = track_image(preprocess_for_vlm(cropped_img))
             if is_monochromatic(preprocessed_img):
                 continue
-        except Exception:
-            continue
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
+        except Exception as exc:
+            raise ProviderPermanentError(f"Failed to crop or preprocess layout item {item_index}: {exc}") from exc
         element_info = {
             "bbox": bbox,
             "category": cat,
@@ -2817,11 +2734,7 @@ def _nano_group_by_bucket(
 
 
 def _nano_is_single_clean_otsl(content: Any) -> bool:
-    return (
-        isinstance(content, str)
-        and content.count("<otsl>") == 1
-        and ("<fcel>" in content or "<ecel>" in content)
-    )
+    return isinstance(content, str) and content.count("<otsl>") == 1 and ("<fcel>" in content or "<ecel>" in content)
 
 
 def _nano_apply_picture_result(el: Dict[str, Any], content: str | None) -> None:
@@ -2882,20 +2795,13 @@ def _nano_postprocess_element(el: Dict[str, Any]) -> None:
             el["content"] = f"![{truncate_repetitive_content(content)}]"
         elif category == "Chart":
             cleaned = normalize_inline_markdown_table(content)
-            el["content"] = _markdown_lib.markdown(
-                html.escape(cleaned), extensions=["tables"]
-            )
+            el["content"] = _markdown_lib.markdown(html.escape(cleaned), extensions=["tables"])
         elif category == "Formula":
             cleaned = truncate_repetitive_content(content)
-            if ("\\(" in cleaned and "\\)" in cleaned) or (
-                "\\[" in cleaned and "\\]" in cleaned
-            ):
+            if ("\\(" in cleaned and "\\)" in cleaned) or ("\\[" in cleaned and "\\]" in cleaned):
                 cleaned = cleaned.replace("$", "")
                 cleaned = (
-                    cleaned.replace("\\(", " $ ")
-                    .replace("\\)", " $ ")
-                    .replace("\\[", " $$ ")
-                    .replace("\\]", " $$ ")
+                    cleaned.replace("\\(", " $ ").replace("\\)", " $ ").replace("\\[", " $$ ").replace("\\]", " $$ ")
                 )
             el["content"] = cleaned
     except Exception as e:  # keep original content on post-processing failure
@@ -2922,6 +2828,7 @@ def _preserve_inline_markup(content: str) -> str:
     content = _HTML_STRIKE_OPEN_RE.sub("~~", content)
     content = _HTML_STRIKE_CLOSE_RE.sub("~~", content)
     return content
+
 
 def _nano_format_blockquote(content: str) -> str:
     stripped = content.strip()
@@ -2984,14 +2891,15 @@ def _nano_format_element(el: Dict[str, Any]) -> str:
 
 def _nano_assemble_markdown(
     elements: List[Dict[str, Any]],
+    page_numbers: Iterable[int],
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Port of response_builder._build_markdown_context/_build_full_markdown:
     sort by (page, layout_order), group contiguous same-page List-items into
     one block, drop empty blocks, page separators '---\\n\\n**Page N**' in the
     full document string only."""
     valid = [
-        e for e in sorted(elements, key=lambda e: (e.get("page_number", 1),
-                                                   e.get("layout_order", 0)))
+        e
+        for e in sorted(elements, key=lambda e: (e.get("page_number", 1), e.get("layout_order", 0)))
         if isinstance(e.get("page_number"), int)
         and not isinstance(e.get("page_number"), bool)
         and e.get("page_number", 0) >= 1
@@ -3019,35 +2927,27 @@ def _nano_assemble_markdown(
         if content:
             blocks.append((page, content))
 
-    md_parts: List[str] = []
-    current_page: int | None = None
-    for page, content in blocks:
-        if current_page is not None and page != current_page:
-            md_parts.append(f"---\n\n**Page {page}**")
-        md_parts.append(content)
-        current_page = page
-
-    pages_md: Dict[int, List[str]] = {}
+    pages_md: Dict[int, List[str]] = {page_number: [] for page_number in page_numbers}
     for page, content in blocks:
         pages_md.setdefault(page, []).append(content)
-    markdown_pages = [
-        {"page_number": page, "content": "\n\n".join(parts)}
-        for page, parts in sorted(pages_md.items())
-    ]
+
+    md_parts: List[str] = []
+    for index, (page, parts) in enumerate(sorted(pages_md.items())):
+        if index:
+            md_parts.append(f"---\n\n**Page {page}**")
+        content = "\n\n".join(parts)
+        if content:
+            md_parts.append(content)
+    markdown_pages = [{"page_number": page, "content": "\n\n".join(parts)} for page, parts in sorted(pages_md.items())]
     return "\n\n".join(md_parts), markdown_pages
 
 
 class _NanoEngine:
     """Per-document pipeline against one OpenAI-compatible vLLM endpoint."""
 
-    def __init__(self, endpoint_url: str, model: str, max_concurrent: int,
-                 timeout_s: float):
+    def __init__(self, endpoint_url: str, model: str, max_concurrent: int, timeout_s: float):
         base = endpoint_url.rstrip("/")
-        self._url = (
-            base + "/chat/completions"
-            if base.endswith("/v1")
-            else base + "/v1/chat/completions"
-        )
+        self._url = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
         self._model = model
         self._max_concurrent = max_concurrent
         self._timeout_s = timeout_s
@@ -3055,8 +2955,10 @@ class _NanoEngine:
     async def parse_pages(self, page_images: Iterable[Image.Image]) -> dict:
         semaphore = asyncio.Semaphore(self._max_concurrent)
         elements: List[Dict[str, Any]] = []
+        page_numbers: list[int] = []
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             for page_no, image in enumerate(page_images, start=1):
+                page_numbers.append(page_no)
                 with close_derived_images(image) as track:
                     normalized = track(normalize_image_mode(image, "RGB"))
                     page_elements = await self._parse_page(client, semaphore, normalized, page_no)
@@ -3065,14 +2967,14 @@ class _NanoEngine:
         for el in elements:
             _nano_postprocess_element(el)
 
-        full_md, markdown_pages = _nano_assemble_markdown(elements)
+        full_md, markdown_pages = _nano_assemble_markdown(elements, page_numbers)
         # rule-based post-processing (the kdl_frontier mode gate is always on
         # for this provider): header_mark -> quote_fold -> title_promote
         full_md = postprocess_markdown(full_md)
         for page in markdown_pages:
             page["content"] = postprocess_markdown(page["content"])
 
-        pages_payload: Dict[int, List[Dict[str, Any]]] = {}
+        pages_payload: Dict[int, List[Dict[str, Any]]] = {page_number: [] for page_number in page_numbers}
         for el in elements:
             pages_payload.setdefault(el["page_number"], []).append(
                 {
@@ -3085,10 +2987,7 @@ class _NanoEngine:
         return {
             "markdown": full_md,
             "markdown_pages": markdown_pages,
-            "pages": [
-                {"page_number": n, "elements": els}
-                for n, els in sorted(pages_payload.items())
-            ],
+            "pages": [{"page_number": n, "elements": els} for n, els in sorted(pages_payload.items())],
         }
 
     async def _parse_page(
@@ -3131,12 +3030,11 @@ class _NanoEngine:
             _nano_payload("layout", self._model, layout_image),
             semaphore,
         )
-        if not layout_content or not layout_content.strip():
-            return []
         if not is_native_layout_response(layout_content):
-            logger.warning("page %d: layout response has no <|box_start|> tokens", page_no)
-            return []
+            raise ProviderPermanentError(f"Page {page_no} returned a non-native layout response")
         items = parse_native_layout_tokens(layout_content)
+        if not items:
+            raise ProviderPermanentError(f"Page {page_no} returned malformed native layout tokens")
         for item in items:
             item["page_number"] = page_no
         buckets = _nano_group_by_bucket(items, image, track)
@@ -3155,9 +3053,7 @@ class _NanoEngine:
             if stage == "picture" and (pre.width < 25 or pre.height < 25):
                 el["content"] = ""
                 return
-            content = await _nano_chat(
-                client, self._url, _nano_payload(stage, self._model, pre), semaphore
-            )
+            content = await _nano_chat(client, self._url, _nano_payload(stage, self._model, pre), semaphore)
             if stage == "picture":
                 _nano_apply_picture_result(el, content)
             else:
@@ -3318,8 +3214,11 @@ class KdlFrontierNanoProvider(Provider):
             if None in (x1, y1, x2, y2):
                 return None
             return LayoutSegmentIR(
-                x=float(x1), y=float(y1),
-                w=float(x2) - float(x1), h=float(y2) - float(y1), label=label,
+                x=float(x1),
+                y=float(y1),
+                w=float(x2) - float(x1),
+                h=float(y2) - float(y1),
+                label=label,
             )
         except Exception:
             return None
@@ -3329,20 +3228,40 @@ class KdlFrontierNanoProvider(Provider):
             raise ProviderPermanentError("KdlFrontierNanoProvider only supports PARSE.")
         raw = raw_result.raw_output
 
-        md_pages = sorted(
-            raw.get("markdown_pages") or [],
-            key=lambda d: d.get("page_number") or 0,
-        )
+        raw_pages = raw.get("pages")
+        md_pages = raw.get("markdown_pages")
+        if not isinstance(raw_pages, list) or not isinstance(md_pages, list):
+            raise ProviderPermanentError("KDL output is missing page collections")
+
+        def page_number(entry: Any, collection: str) -> int:
+            if not isinstance(entry, dict):
+                raise ProviderPermanentError(f"KDL {collection} entry is not an object")
+            value = entry.get("page_number")
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ProviderPermanentError(f"KDL {collection} entry has invalid page_number: {value!r}")
+            return value
+
+        source_page_numbers = [page_number(page, "pages") for page in raw_pages]
+        markdown_by_page = {page_number(page, "markdown_pages"): page for page in md_pages}
+        if (
+            source_page_numbers != sorted(source_page_numbers)
+            or len(source_page_numbers) != len(set(source_page_numbers))
+            or set(markdown_by_page) != set(source_page_numbers)
+            or len(markdown_by_page) != len(md_pages)
+        ):
+            raise ProviderPermanentError("KDL output page identities are inconsistent")
+
         pages = [
-            PageIR(page_index=idx, markdown=str(mp.get("content", "")))
-            for idx, mp in enumerate(md_pages)
+            PageIR(
+                page_index=source_page_number - 1,
+                markdown=str(markdown_by_page[source_page_number].get("content", "")),
+            )
+            for source_page_number in source_page_numbers
         ]
-        full_markdown = raw.get("markdown") or "\n\n<!-- page-break -->\n\n".join(
-            p.markdown for p in pages
-        )
+        full_markdown = raw.get("markdown") or "\n\n<!-- page-break -->\n\n".join(p.markdown for p in pages)
 
         layout_pages: list[ParseLayoutPageIR] = []
-        for p in raw.get("pages") or []:
+        for p in raw_pages:
             items: list[LayoutItemIR] = []
             for e in p.get("elements") or []:
                 seg = self._bbox_to_segment(e.get("bbox"), str(e.get("category", "")) or None)
@@ -3354,12 +3273,7 @@ class KdlFrontierNanoProvider(Provider):
                         layout_segments=[seg] if seg else [],
                     )
                 )
-            try:
-                layout_pages.append(
-                    ParseLayoutPageIR(page_number=int(p.get("page_number") or 1), items=items)
-                )
-            except Exception:
-                pass
+            layout_pages.append(ParseLayoutPageIR(page_number=page_number(p, "pages"), items=items))
 
         output = ParseOutput(
             task_type="parse",
