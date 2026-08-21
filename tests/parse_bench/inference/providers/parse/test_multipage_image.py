@@ -4,8 +4,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+from parse_bench.inference.providers.base import ProviderPermanentError
 from parse_bench.inference.providers.parse._multipage_image import (
     normalize_pdf_pages,
     run_pdf_pages,
@@ -35,10 +37,26 @@ def _request(source: Path) -> InferenceRequest:
 def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "document.pdf"
     source.touch()
-    rendered_pages = [Image.new("RGB", (20 + page_index, 30), (page_index, 0, 0)) for page_index in (1, 2, 3)]
+    events: list[tuple[str, int]] = []
+    rendered_pages: list[Image.Image] = []
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 3})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        assert Path(path) == source
+        assert dpi == 144
+        assert first_page == last_page
+        if rendered_pages:
+            with pytest.raises(ValueError, match="Operation on closed image"):
+                rendered_pages[-1].getpixel((0, 0))
+        events.append(("render", first_page))
+        image = Image.new("RGB", (20 + first_page, 30), (first_page, 0, 0))
+        rendered_pages.append(image)
+        return [image]
+
     monkeypatch.setattr(
         "pdf2image.convert_from_path",
-        lambda path, dpi: rendered_pages,
+        render_page,
     )
 
     observed_pages: list[tuple[str, int]] = []
@@ -47,6 +65,7 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
         image_path = Path(request.source_file_path)
         with Image.open(image_path) as image:
             page_number = image.getpixel((0, 0))[0]
+        events.append(("infer", page_number))
         observed_pages.append((image_path.name, page_number))
         now = datetime.now()
         return RawInferenceResult(
@@ -73,6 +92,17 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
         ("page-000002.png", 2),
         ("page-000003.png", 3),
     ]
+    # Rendering and inference alternate, so later pages cannot be retained eagerly.
+    assert events == [
+        ("render", 1),
+        ("infer", 1),
+        ("render", 2),
+        ("infer", 2),
+        ("render", 3),
+        ("infer", 3),
+    ]
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        rendered_pages[-1].getpixel((0, 0))
     # Raw artifacts must remain checkpoint-safe after temporary images disappear.
     json.dumps(raw_result.model_dump(mode="json"))
 
@@ -98,6 +128,7 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
     result = normalize_pdf_pages(raw_result, normalize_single_image=normalize_single_image)
 
     assert result is not None
+    assert isinstance(result.output, ParseOutput)
     assert result.output.markdown == "page 1\n\npage 2\n\npage 3"
     assert [(page.page_index, page.markdown) for page in result.output.pages] == [
         (0, "page 1"),
@@ -105,6 +136,45 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
         (2, "page 3"),
     ]
     assert [page.page_number for page in result.output.layout_pages] == [1, 2, 3]
+
+
+def test_pdf_render_failure_identifies_page_and_stops(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    render_calls: list[int] = []
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 3})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        render_calls.append(first_page)
+        if first_page == 2:
+            raise RuntimeError("poppler failed")
+        return [Image.new("RGB", (8, 8), "white")]
+
+    monkeypatch.setattr("pdf2image.convert_from_path", render_page)
+
+    def run_single_image(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        now = datetime.now()
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output={"markdown": "page 1"},
+            started_at=now,
+            completed_at=now,
+            latency_in_ms=1,
+        )
+
+    with pytest.raises(ProviderPermanentError, match="Failed to render PDF page 2: poppler failed"):
+        run_pdf_pages(
+            _pipeline(),
+            _request(source),
+            dpi=144,
+            run_single_image=run_single_image,
+        )
+
+    assert render_calls == [1, 2]
 
 
 def test_single_image_input_stays_on_the_provider_path(tmp_path: Path) -> None:

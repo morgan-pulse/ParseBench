@@ -46,33 +46,53 @@ def run_pdf_pages(
         return None
 
     try:
-        from pdf2image import convert_from_path
+        from pdf2image import convert_from_path, pdfinfo_from_path
     except ImportError as exc:
         raise ProviderConfigError("pdf2image is required to process PDF inputs") from exc
 
     started_at = datetime.now()
     try:
-        images = convert_from_path(source_path, dpi=dpi)
+        page_count = pdfinfo_from_path(str(source_path)).get("Pages")
     except Exception as exc:
-        raise ProviderPermanentError(f"Failed to convert PDF to images: {exc}") from exc
+        raise ProviderPermanentError(f"Failed to inspect PDF: {exc}") from exc
 
-    if not images:
+    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
         raise ProviderPermanentError(f"No pages found in PDF: {source_path}")
 
     page_results: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="parse-bench-pages-") as temp_dir:
-        for page_index, image in enumerate(images):
+        for page_index in range(page_count):
+            page_number = page_index + 1
+            try:
+                images = convert_from_path(
+                    str(source_path),
+                    dpi=dpi,
+                    first_page=page_number,
+                    last_page=page_number,
+                )
+            except Exception as exc:
+                raise ProviderPermanentError(f"Failed to render PDF page {page_number}: {exc}") from exc
+
+            if len(images) != 1:
+                for image in images:
+                    image.close()
+                raise ProviderPermanentError(f"Expected one image for PDF page {page_number}, got {len(images)}")
+
+            image = images[0]
             page_path = Path(temp_dir) / f"page-{page_index + 1:06d}.png"
-            _save_png(image, page_path)
-            page_request = request.model_copy(update={"source_file_path": str(page_path)})
-            page_result = run_single_image(pipeline, page_request)
-            page_results.append(
-                {
-                    "page_index": page_index,
-                    "raw_output": page_result.raw_output,
-                    "latency_in_ms": page_result.latency_in_ms,
-                }
-            )
+            try:
+                _save_png(image, page_path)
+                page_request = request.model_copy(update={"source_file_path": str(page_path)})
+                page_result = run_single_image(pipeline, page_request)
+                page_results.append(
+                    {
+                        "page_index": page_index,
+                        "raw_output": page_result.raw_output,
+                        "latency_in_ms": page_result.latency_in_ms,
+                    }
+                )
+            finally:
+                image.close()
 
     completed_at = datetime.now()
     return RawInferenceResult(
@@ -152,6 +172,9 @@ def normalize_pdf_pages(
 def _save_png(image: Image.Image, destination: Path) -> None:
     """Persist a rendered page without leaking an open PDF image handle."""
 
-    if image.mode not in ("RGB", "RGBA"):
-        image = image.convert("RGB")
-    image.save(destination, format="PNG")
+    if image.mode in ("RGB", "RGBA"):
+        image.save(destination, format="PNG")
+        return
+
+    with image.convert("RGB") as converted:
+        converted.save(destination, format="PNG")
