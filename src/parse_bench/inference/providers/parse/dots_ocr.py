@@ -397,33 +397,11 @@ class DotsOcrParseProvider(Provider):
                 last_error = e
                 break
 
-        completed_at = datetime.now()
-        latency_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-        error_msg = str(last_error)
-        if isinstance(last_error, TimeoutError):
-            error_msg = f"Request timed out after {self._timeout} seconds"
-
-        return RawInferenceResult(
-            request=request,
-            pipeline=pipeline,
-            pipeline_name=pipeline.pipeline_name,
-            product_type=request.product_type,
-            raw_output={
-                "pages": [],
-                "_error": error_msg,
-                "_error_type": type(last_error).__name__ if last_error else "Unknown",
-                "model": self._model,
-                "config": {
-                    "dpi": self._dpi,
-                    "max_tokens": self._max_tokens,
-                    "timeout": self._timeout,
-                },
-            },
-            started_at=started_at,
-            completed_at=completed_at,
-            latency_in_ms=latency_ms,
-        )
+        if isinstance(last_error, (ProviderPermanentError, ProviderTransientError, ProviderConfigError)):
+            raise last_error
+        if last_error is not None:
+            raise ProviderPermanentError(f"Unexpected error during inference: {last_error}") from last_error
+        raise ProviderPermanentError("Inference failed without an error")
 
     # ------------------------------------------------------------------
     # normalize

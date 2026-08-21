@@ -67,43 +67,36 @@ class TesseractProvider(Provider):
             pages = []
             with open_document_page_images(pdf_path, dpi=self._dpi) as images:
                 for page_index, image in enumerate(images):
-                    try:
-                        # Perform OCR based on output type
-                        if self._output_type == "text":
-                            text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
-                        elif self._output_type == "dict":
-                            data = pytesseract.image_to_data(
-                                image,
-                                lang=self._lang,
-                                config=self._config,
-                                output_type=pytesseract.Output.DICT,
-                            )
-                            text = " ".join([word for word in data.get("text", []) if word.strip()])
-                        elif self._output_type == "data":
-                            text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
-                        elif self._output_type == "boxes":
-                            text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
-                        elif self._output_type == "osd":
-                            text = pytesseract.image_to_osd(image, config=self._config)
-                        else:
-                            text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+                    # A failed page invalidates the document. Let the outer
+                    # classifier preserve retryable failures instead of
+                    # emitting a partial document with an error placeholder.
+                    if self._output_type == "text":
+                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+                    elif self._output_type == "dict":
+                        data = pytesseract.image_to_data(
+                            image,
+                            lang=self._lang,
+                            config=self._config,
+                            output_type=pytesseract.Output.DICT,
+                        )
+                        text = " ".join([word for word in data.get("text", []) if word.strip()])
+                    elif self._output_type == "data":
+                        text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
+                    elif self._output_type == "boxes":
+                        text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
+                    elif self._output_type == "osd":
+                        text = pytesseract.image_to_osd(image, config=self._config)
+                    else:
+                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
 
-                        pages.append(
-                            {
-                                "page_index": page_index,
-                                "text": text,
-                                "width": image.width,
-                                "height": image.height,
-                            }
-                        )
-                    except Exception as e:
-                        pages.append(
-                            {
-                                "page_index": page_index,
-                                "text": "",
-                                "error": str(e),
-                            }
-                        )
+                    pages.append(
+                        {
+                            "page_index": page_index,
+                            "text": text,
+                            "width": image.width,
+                            "height": image.height,
+                        }
+                    )
 
                 num_pages = len(images)
 
@@ -117,6 +110,8 @@ class TesseractProvider(Provider):
                 },
             }
 
+        except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
+            raise
         except FileNotFoundError as e:
             raise ProviderPermanentError(f"PDF file not found: {pdf_path}") from e
         except Exception as e:

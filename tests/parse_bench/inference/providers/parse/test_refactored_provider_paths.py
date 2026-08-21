@@ -41,14 +41,15 @@ def _request(source: Path) -> InferenceRequest:
 
 
 class _TextractClient:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, failure: Exception | None = None, fail_on_call: int = 1) -> None:
         self.calls = 0
-        self.fail = fail
+        self.failure = failure
+        self.fail_on_call = fail_on_call
 
     def analyze_document(self, **kwargs: object) -> dict[str, object]:
         self.calls += 1
-        if self.fail:
-            raise RuntimeError("textract failed")
+        if self.failure is not None and self.calls == self.fail_on_call:
+            raise self.failure
         return {
             "Blocks": [
                 {
@@ -105,15 +106,16 @@ def _install_boundary(
     module_name: str,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    fail: bool = False,
+    failure: Exception | None = None,
+    fail_on_call: int = 1,
 ) -> list[int]:
     calls: list[int] = []
 
     def next_page() -> int:
         page_number = len(calls) + 1
         calls.append(page_number)
-        if fail:
-            raise ProviderPermanentError("provider boundary failed")
+        if failure is not None and page_number == fail_on_call:
+            raise failure
         return page_number
 
     def usage(page_number: int) -> dict[str, int]:
@@ -145,7 +147,7 @@ def _install_boundary(
 
         monkeypatch.setattr(pytesseract, "image_to_string", lambda *args, **kwargs: f"page {next_page()}")
     elif module_name == "textract":
-        provider._textract_client = _TextractClient(fail=fail)
+        provider._textract_client = _TextractClient(failure=failure, fail_on_call=fail_on_call)
     return calls
 
 
@@ -231,7 +233,7 @@ def test_refactored_provider_preserves_single_image_behavior(
 
 
 @pytest.mark.parametrize(("module_name", "class_name", "dpi"), LEGACY_PROVIDERS)
-def test_refactored_provider_closes_pages_when_provider_boundary_fails(
+def test_refactored_provider_propagates_permanent_failure_without_partial_document(
     module_name: str,
     class_name: str,
     dpi: int,
@@ -242,15 +244,57 @@ def test_refactored_provider_closes_pages_when_provider_boundary_fails(
     source.touch()
     rendered = _mock_pdf(source, monkeypatch)
     provider = _provider(module_name, class_name, dpi)
-    _install_boundary(provider, module_name, monkeypatch, fail=True)
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    calls = _install_boundary(
+        provider,
+        module_name,
+        monkeypatch,
+        failure=ProviderPermanentError("provider boundary failed"),
+        fail_on_call=2,
+    )
+    delays: list[int] = []
+    monkeypatch.setattr("time.sleep", delays.append)
 
-    try:
+    with pytest.raises(ProviderPermanentError, match="provider boundary failed"):
         provider.run_inference(_pipeline(module_name), _request(source))
-    except (ProviderPermanentError, ProviderTransientError):
-        pass
 
-    assert rendered
+    boundary_calls = provider._textract_client.calls if module_name == "textract" else calls
+    assert boundary_calls == 2 if module_name == "textract" else [1, 2]
+    assert delays == []
+    assert len(rendered) == 2
+    for image in rendered:
+        with pytest.raises(ValueError, match="Operation on closed image"):
+            image.getpixel((0, 0))
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "dpi"),
+    [provider for provider in LEGACY_PROVIDERS if provider[0] != "dots_ocr"],
+)
+def test_refactored_provider_propagates_transient_page_failure_for_document_retry(
+    module_name: str,
+    class_name: str,
+    dpi: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered = _mock_pdf(source, monkeypatch)
+    provider = _provider(module_name, class_name, dpi)
+    calls = _install_boundary(
+        provider,
+        module_name,
+        monkeypatch,
+        failure=ProviderTransientError("timeout on page two"),
+        fail_on_call=2,
+    )
+
+    with pytest.raises(ProviderTransientError, match="timeout on page two"):
+        provider.run_inference(_pipeline(module_name), _request(source))
+
+    boundary_calls = provider._textract_client.calls if module_name == "textract" else calls
+    assert boundary_calls == 2 if module_name == "textract" else [1, 2]
+    assert len(rendered) == 2
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
             image.getpixel((0, 0))
@@ -263,14 +307,13 @@ def test_dots_ocr_retries_the_document_after_transient_page_failure(
     source.touch()
     _mock_pdf(source, monkeypatch)
     provider = _provider("dots_ocr", "DotsOcrParseProvider", 144)
-    calls = 0
+    page_widths: list[int] = []
 
     def call_endpoint(image: Image.Image) -> str:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
+        page_widths.append(image.width)
+        if len(page_widths) == 2:
             raise ProviderTransientError("retry me")
-        return f"page {calls - 1}"
+        return f"page {image.width - 8}"
 
     provider._call_endpoint = call_endpoint
     delays: list[int] = []
@@ -279,6 +322,30 @@ def test_dots_ocr_retries_the_document_after_transient_page_failure(
     raw_result = provider.run_inference(_pipeline("dots_ocr"), _request(source))
     result = provider.normalize(raw_result)
 
-    assert calls == 3
+    assert page_widths == [9, 10, 9, 10]
     assert delays == [15]
     assert result.output.markdown == "page 1\n\npage 2"
+
+
+def test_dots_ocr_propagates_transient_failure_after_document_retries_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    _mock_pdf(source, monkeypatch)
+    provider = _provider("dots_ocr", "DotsOcrParseProvider", 144)
+    page_widths: list[int] = []
+
+    def call_endpoint(image: Image.Image) -> str:
+        page_widths.append(image.width)
+        raise ProviderTransientError("retry me")
+
+    provider._call_endpoint = call_endpoint
+    delays: list[int] = []
+    monkeypatch.setattr("time.sleep", delays.append)
+
+    with pytest.raises(ProviderTransientError, match="retry me"):
+        provider.run_inference(_pipeline("dots_ocr"), _request(source))
+
+    assert page_widths == [9, 9, 9]
+    assert delays == [15, 30]
