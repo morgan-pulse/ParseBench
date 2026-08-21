@@ -209,10 +209,7 @@ def test_kdl_real_page_stage_closes_every_derivative(
     page = _content_image()
     derived = _track_pillow_derivatives(monkeypatch)
     monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
-    layout = (
-        "<|box_start|>100 100 900 900<|box_end|>"
-        "<|ref_start|>text<|ref_end|>"
-    )
+    layout = "<|box_start|>100 100 900 900<|box_end|><|ref_start|>text<|ref_end|>"
     calls = 0
 
     async def chat(*args: object, **kwargs: object) -> str:
@@ -247,10 +244,7 @@ def test_kdl_real_page_two_stage_failure_aborts_document(
     pages = [_content_image(), _content_image()]
     derived = _track_pillow_derivatives(monkeypatch)
     monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
-    layout = (
-        "<|box_start|>100 100 900 900<|box_end|>"
-        "<|ref_start|>text<|ref_end|>"
-    )
+    layout = "<|box_start|>100 100 900 900<|box_end|><|ref_start|>text<|ref_end|>"
     calls = 0
 
     async def chat(*args: object, **kwargs: object) -> str:

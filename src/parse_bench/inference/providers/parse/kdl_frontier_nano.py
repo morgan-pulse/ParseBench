@@ -454,10 +454,7 @@ def analyze_page_content(image: Image.Image) -> PageContentMetrics:
             foreground_pixels = sum(
                 1
                 for value in pixels
-                if (
-                    background_level - value >= FOREGROUND_DELTA_THRESHOLD
-                    and value < FOREGROUND_DARK_THRESHOLD
-                )
+                if (background_level - value >= FOREGROUND_DELTA_THRESHOLD and value < FOREGROUND_DARK_THRESHOLD)
             )
             foreground_ratio = foreground_pixels / total_pixels
 
@@ -477,10 +474,7 @@ def analyze_page_content(image: Image.Image) -> PageContentMetrics:
                             edge_hits += 1
                     if y + 1 < sample_height:
                         edge_pairs += 1
-                        if (
-                            abs(value - pixels[row_offset + sample_width + x])
-                            >= EDGE_DELTA_THRESHOLD
-                        ):
+                        if abs(value - pixels[row_offset + sample_width + x]) >= EDGE_DELTA_THRESHOLD:
                             edge_hits += 1
 
             edge_ratio = edge_hits / edge_pairs if edge_pairs else 0.0
@@ -528,6 +522,7 @@ def preprocess_for_vlm(image: Image.Image) -> Image.Image:
     if processed is not normalized and normalized is not image:
         normalized.close()
     return processed
+
 
 # ==========================================================================
 # [vendored] native_layout
@@ -991,7 +986,7 @@ class TableCell(BaseModel):
         Returns:
             Any: TableCell-compatible dict.
         """
-        if isinstance(data, Dict):
+        if isinstance(data, dict):
             if "text" in data:
                 return data
             text = data["bbox"].get("token", "")
@@ -2749,9 +2744,7 @@ async def _nano_chat(
                     json={**payload, "chat_template_kwargs": {"enable_thinking": False}},
                 )
                 if resp.status_code >= 500 or resp.status_code in (408, 429):
-                    raise httpx.HTTPStatusError(
-                        f"{resp.status_code}", request=resp.request, response=resp
-                    )
+                    raise httpx.HTTPStatusError(f"{resp.status_code}", request=resp.request, response=resp)
                 if resp.status_code >= 400:
                     raise ProviderPermanentError(
                         f"Stage request rejected with HTTP {resp.status_code}: {resp.text[:200]}"
@@ -2761,7 +2754,7 @@ async def _nano_chat(
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("stage response contained no text content")
                 return content
-            except (httpx.HTTPError, asyncio.TimeoutError, IndexError, KeyError, TypeError, ValueError) as e:
+            except (httpx.HTTPError, TimeoutError, IndexError, KeyError, TypeError, ValueError) as e:
                 last_exc = e
                 if attempt < 2:
                     await asyncio.sleep(min(10.0, 2.0 * (2**attempt)))
@@ -2770,13 +2763,16 @@ async def _nano_chat(
 
 
 def _nano_group_by_bucket(
-    content: List[Dict[str, Any]],
+    content: list[dict[str, Any]],
     original_image: Image.Image,
     track_image: Callable[[Image.Image], Image.Image],
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Verbatim port of result_parser.group_content_by_category."""
-    result: Dict[str, List[Dict[str, Any]]] = {
-        "text": [], "table": [], "picture": [], "formula": [],
+    result: dict[str, list[dict[str, Any]]] = {
+        "text": [],
+        "table": [],
+        "picture": [],
+        "formula": [],
     }
     im_w, im_h = original_image.size
     for item in content:
@@ -3101,7 +3097,7 @@ class _NanoEngine:
         semaphore: asyncio.Semaphore,
         image: Image.Image,
         page_no: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         with close_derived_images(image) as track:
             return await self._parse_page_with_owned_images(
                 client,
@@ -3118,7 +3114,7 @@ class _NanoEngine:
         image: Image.Image,
         page_no: int,
         track: Callable[[Image.Image], Image.Image],
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         w, h = image.size
         if min(w, h) < 32:
             return []
@@ -3130,7 +3126,9 @@ class _NanoEngine:
 
         layout_image = track(prepare_native_layout_image(image))
         layout_content = await _nano_chat(
-            client, self._url, _nano_payload("layout", self._model, layout_image),
+            client,
+            self._url,
+            _nano_payload("layout", self._model, layout_image),
             semaphore,
         )
         if not layout_content or not layout_content.strip():
@@ -3145,13 +3143,11 @@ class _NanoEngine:
 
         # native full-page table route (single-table pages preserve multi-line
         # cells only with full-page context; adopted only for single clean OTSL)
-        fullpage_table = (
-            track(preprocess_for_vlm(image)) if len(buckets["table"]) == 1 else None
-        )
+        fullpage_table = track(preprocess_for_vlm(image)) if len(buckets["table"]) == 1 else None
 
         tasks = []
 
-        async def recognize(stage: str, el: Dict[str, Any]) -> None:
+        async def recognize(stage: str, el: dict[str, Any]) -> None:
             pre = el.get("preprocessed_image")
             if pre is None:
                 el["content"] = ""
@@ -3167,11 +3163,13 @@ class _NanoEngine:
             else:
                 el["content"] = content if content is not None else ""
 
-        async def recognize_table_fullpage(el: Dict[str, Any]) -> None:
+        async def recognize_table_fullpage(el: dict[str, Any]) -> None:
             assert fullpage_table is not None
             content = await _nano_chat(
-                client, self._url,
-                _nano_payload("table", self._model, fullpage_table), semaphore,
+                client,
+                self._url,
+                _nano_payload("table", self._model, fullpage_table),
+                semaphore,
             )
             if content is not None and _nano_is_single_clean_otsl(content):
                 el["content"] = content
@@ -3191,7 +3189,7 @@ class _NanoEngine:
             tasks.append(recognize("formula", el))
         await asyncio.gather(*tasks)
 
-        page_elements: List[Dict[str, Any]] = []
+        page_elements: list[dict[str, Any]] = []
         picture_idx = 0
         for bucket_name in ("text", "table", "picture", "formula"):
             for el in buckets[bucket_name]:
@@ -3205,10 +3203,8 @@ class _NanoEngine:
                     # metrics consume the markdown text only and never
                     # dereference image paths.
                     if cropped is not None and cropped.width >= 25 and cropped.height >= 25:
-                        el["picture_path"] = (
-                            "artifacts/cropped_pictures/"
-                            f"page_{page_no:03d}_picture_{picture_idx:03d}.png"
-                        )
+                        picture_name = f"page_{page_no:03d}_picture_{picture_idx:03d}.png"
+                        el["picture_path"] = f"artifacts/cropped_pictures/{picture_name}"
                     picture_idx += 1
                 page_elements.append(el)
         return page_elements
@@ -3221,26 +3217,18 @@ class KdlFrontierNanoProvider(Provider):
 
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
-        self._endpoint_url = (
-            self.base_config.get("endpoint_url")
-            or os.getenv("KDL_NANO_ENDPOINT_URL")
-            or ""
-        ).rstrip("/")
+        self._endpoint_url = (self.base_config.get("endpoint_url") or os.getenv("KDL_NANO_ENDPOINT_URL") or "").rstrip(
+            "/"
+        )
         if not self._endpoint_url:
             raise ProviderConfigError(
                 "KDL_NANO_ENDPOINT_URL is required (vLLM OpenAI-compatible base "
                 "URL ending in /v1, serving KDLAI/KDL-Frontier-Parser-nano)."
             )
-        self._model = (
-            self.base_config.get("model")
-            or os.getenv("KDL_NANO_MODEL")
-            or "kdl-frontier-parser-nano"
-        )
+        self._model = self.base_config.get("model") or os.getenv("KDL_NANO_MODEL") or "kdl-frontier-parser-nano"
         self._dpi = int(self.base_config.get("dpi", os.getenv("KDL_NANO_DPI", "144")))
         self._timeout = float(self.base_config.get("timeout", 900))
-        self._max_pages = int(
-            self.base_config.get("max_pages", os.getenv("KDL_NANO_MAX_PAGES", "400"))
-        )
+        self._max_pages = int(self.base_config.get("max_pages", os.getenv("KDL_NANO_MAX_PAGES", "400")))
         self._max_concurrent = int(os.getenv("KDL_NANO_MAX_CONCURRENT", "8"))
 
     @contextmanager
