@@ -46,6 +46,8 @@ import os
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -62,6 +64,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import PageImages, close_derived_images
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -3027,13 +3030,14 @@ class _NanoEngine:
         self._max_concurrent = max_concurrent
         self._timeout_s = timeout_s
 
-    async def parse_pages(self, page_images: List[Image.Image]) -> dict:
+    async def parse_pages(self, page_images: Iterable[Image.Image]) -> dict:
         semaphore = asyncio.Semaphore(self._max_concurrent)
         elements: List[Dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             for page_no, image in enumerate(page_images, start=1):
-                image = normalize_image_mode(image, "RGB")
-                page_elements = await self._parse_page(client, semaphore, image, page_no)
+                with close_derived_images(image) as track:
+                    normalized = track(normalize_image_mode(image, "RGB"))
+                    page_elements = await self._parse_page(client, semaphore, normalized, page_no)
                 elements.extend(page_elements)
 
         for el in elements:
@@ -3195,23 +3199,57 @@ class KdlFrontierNanoProvider(Provider):
         )
         self._max_concurrent = int(os.getenv("KDL_NANO_MAX_CONCURRENT", "8"))
 
-    def _load_page_images(self, source_path: Path) -> List[Image.Image]:
+    @contextmanager
+    def _open_page_images(self, source_path: Path) -> Iterator[PageImages]:
         if source_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".jfif"):
-            return [Image.open(source_path)]
+            image = Image.open(source_path)
+            try:
+                yield PageImages(1, iter((image,)))
+            finally:
+                image.close()
+            return
+
         import fitz  # PyMuPDF
 
         zoom = self._dpi / 72.0
         mat = fitz.Matrix(zoom, zoom)
-        images: List[Image.Image] = []
-        with fitz.open(str(source_path)) as doc:
-            if doc.page_count > self._max_pages:
+        try:
+            document = fitz.open(str(source_path))
+        except Exception as exc:
+            raise ProviderPermanentError(f"Failed to open document: {exc}") from exc
+
+        with document:
+            if document.page_count > self._max_pages:
                 raise ProviderPermanentError(
-                    f"Document has {doc.page_count} pages > max_pages={self._max_pages}."
+                    f"Document has {document.page_count} pages > max_pages={self._max_pages}."
                 )
-            for page in doc:
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
-        return images
+            if document.page_count < 1:
+                raise ProviderPermanentError("Document rendered to zero pages.")
+            images = self._iter_page_images(document, mat)
+            try:
+                yield PageImages(document.page_count, images)
+            finally:
+                images.close()
+
+    @staticmethod
+    def _iter_page_images(document: Any, matrix: Any) -> Generator[Image.Image]:
+        for page_number, page in enumerate(document, start=1):
+            image: Image.Image | None = None
+            try:
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                png_bytes = pixmap.tobytes("png")
+                image = Image.open(io.BytesIO(png_bytes))
+                image.load()
+            except Exception as exc:
+                if image is not None:
+                    image.close()
+                raise ProviderPermanentError(
+                    f"Failed to render document page {page_number}: {exc}"
+                ) from exc
+            try:
+                yield image
+            finally:
+                image.close()
 
     def run_inference(
         self, pipeline: PipelineSpec, request: InferenceRequest
@@ -3220,22 +3258,18 @@ class KdlFrontierNanoProvider(Provider):
         if not source_path.exists():
             raise ProviderPermanentError(f"Source file not found: {source_path}")
         started_at = datetime.now()
-        try:
-            page_images = self._load_page_images(source_path)
-        except ProviderPermanentError:
-            raise
-        except Exception as e:
-            raise ProviderPermanentError(f"Failed to load document: {e}") from e
-        if not page_images:
-            raise ProviderPermanentError("Document rendered to zero pages.")
-
         engine = _NanoEngine(
             self._endpoint_url, self._model, self._max_concurrent, self._timeout
         )
         try:
-            raw_output = self.run_async_from_sync(engine.parse_pages(page_images))
-        except Exception as e:
-            raise ProviderTransientError(f"Pipeline failed: {e}") from e
+            with self._open_page_images(source_path) as page_images:
+                raw_output = self.run_async_from_sync(engine.parse_pages(page_images))
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
+        except (TimeoutError, httpx.HTTPError) as exc:
+            raise ProviderTransientError(f"Pipeline failed: {exc}") from exc
+        except Exception as exc:
+            raise ProviderPermanentError(f"Unexpected pipeline failure: {exc}") from exc
         completed_at = datetime.now()
         return RawInferenceResult(
             request=request,
