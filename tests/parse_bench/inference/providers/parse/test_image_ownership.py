@@ -340,13 +340,62 @@ def test_infinity_deep_parsing_closes_every_crop(fail: bool, tmp_path: Path, mon
         return f"table {call_count - 1}"
 
     provider = _infinity_provider(Mock(side_effect=parse), deep_parsing=True)
-    result = provider._parse_document(str(source))["result"]
-
     if fail:
-        assert result == shallow
+        with pytest.raises(ProviderPermanentError, match="Error during deep parsing: deep parse failed") as caught:
+            provider._parse_document(str(source))
+        assert isinstance(caught.value.__cause__, RuntimeError)
     else:
+        result = provider._parse_document(str(source))["result"]
         assert [element["text"] for element in json.loads(result)] == ["table 1", "table 2"]
     assert len(crops) == 2
     assert all(isinstance(image.close, Mock) and image.close.call_count == 1 for image in crops)
+    assert isinstance(opened_image.close, Mock) and opened_image.close.call_count == 1
+    assert isinstance(converted_image.close, Mock) and converted_image.close.call_count == 1
+
+
+def test_infinity_deep_parsing_preserves_classified_error_and_closes_crop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from parse_bench.inference.providers.base import ProviderTransientError
+    from parse_bench.inference.providers.parse import infinity_parser2 as infinity_module
+
+    source = tmp_path / "page.png"
+    source.touch()
+    opened_image = Image.new("RGB", (8, 8), "white")
+    converted_image = Image.new("RGB", (8, 8), "white")
+    opened_image.close = Mock(wraps=opened_image.close)
+    converted_image.close = Mock(wraps=converted_image.close)
+
+    class OpenedImageContext:
+        def __enter__(self) -> Image.Image:
+            return opened_image
+
+        def __exit__(self, *args: object) -> None:
+            opened_image.close()
+
+    monkeypatch.setattr(infinity_module.PILImage, "open", lambda path: OpenedImageContext())
+    monkeypatch.setattr(Image.Image, "convert", lambda image, *args, **kwargs: converted_image)
+    crops: list[Image.Image] = []
+    real_crop = Image.Image.crop
+
+    def crop(image: Image.Image, *args: Any, **kwargs: Any) -> Image.Image:
+        derived = real_crop(image, *args, **kwargs)
+        derived.close = Mock(wraps=derived.close)
+        crops.append(derived)
+        return derived
+
+    monkeypatch.setattr(Image.Image, "crop", crop)
+    shallow = json.dumps([{"category": "figure", "bbox": [0, 0, 4, 4], "text": "figure"}])
+    classified = ProviderTransientError("deep provider timed out")
+    parser = Mock(side_effect=[shallow, classified])
+    provider = _infinity_provider(parser, deep_parsing=True)
+
+    with pytest.raises(ProviderTransientError, match="deep provider timed out") as caught:
+        provider._parse_document(str(source))
+
+    assert caught.value is classified
+    assert len(crops) == 1
+    assert isinstance(crops[0].close, Mock) and crops[0].close.call_count == 1
     assert isinstance(opened_image.close, Mock) and opened_image.close.call_count == 1
     assert isinstance(converted_image.close, Mock) and converted_image.close.call_count == 1

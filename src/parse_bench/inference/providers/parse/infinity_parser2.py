@@ -1,7 +1,6 @@
 """Provider for Infinity-Parser2 PARSE via infinity_parser2 SDK with vLLM server."""
 
 import json
-import logging
 import re
 import traceback
 from datetime import datetime
@@ -31,8 +30,6 @@ from parse_bench.schemas.pipeline_io import (
     RawInferenceResult,
 )
 from parse_bench.schemas.product import ProductType
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "infly/Infinity-Parser2-Flash"
 
@@ -153,6 +150,8 @@ class InfinityParser2Provider(Provider):
             finally:
                 pil_image.close()
 
+        except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             transient_keywords = ["timeout", "network", "connection", "cuda", "out of memory", "oom"]
@@ -262,7 +261,8 @@ class InfinityParser2Provider(Provider):
         ``pil_image``, re-parses the cropped images with a custom table-extraction prompt,
         and overwrites ``elem["text"]`` in place before serializing back to JSON.
 
-        Returns the (possibly modified) JSON string.
+        Returns the modified JSON string. Any configured deep-parsing failure
+        aborts inference rather than silently substituting the shallow result.
         """
         try:
             elements: list[dict] = json.loads(result)
@@ -299,9 +299,14 @@ class InfinityParser2Provider(Provider):
 
             return json.dumps(elements)
 
-        except Exception:
-            logger.exception("Deep parsing pass failed; returning shallow parse result")
-            return result
+        except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
+            raise
+        except Exception as e:
+            error_str = str(e).lower()
+            transient_keywords = ["timeout", "network", "connection", "cuda", "out of memory", "oom"]
+            if any(keyword in error_str for keyword in transient_keywords):
+                raise ProviderTransientError(f"Error during deep parsing (GPU/memory): {e}") from e
+            raise ProviderPermanentError(f"Error during deep parsing: {e}") from e
 
     def _normalize(self, raw_result: RawInferenceResult) -> ParseOutput:
         """Normalize JSON layout result into ParseOutput with pages, layout_pages, and markdown."""
