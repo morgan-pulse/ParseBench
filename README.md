@@ -233,13 +233,14 @@ ANTHROPIC_API_KEY=...
 GOOGLE_API_KEY=...
 ```
 
-ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic and rule-based. API keys are only used to call the parsing tool being evaluated.
+By default ParseBench does **not** use LLM-as-a-judge — all evaluation is deterministic and rule-based, and API keys are only used to call the parsing tool being evaluated. (An opt-in chart normalization mode exists but is off by default — see [`LLAMACLOUD_BENCH_LLM_NORMALIZATION`](#environment-variables).)
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PARSEBENCH_FAST_TEDS` | `1` | Fast Zhang-Shasha TEDS table metric (uses the `numba` JIT when the [`fast` extra](#quick-start) is installed, otherwise an exact pure-Python fallback). Set to `0` to force the original APTED implementation — scores are identical either way, so this is only needed for debugging or benchmarking. |
+| `LLAMACLOUD_BENCH_LLM_NORMALIZATION` | `off` | Set to `judge` to opt into LLM-as-judge chart normalization (non-deterministic, needs `ANTHROPIC_API_KEY`). |
 
 ### CLI Reference
 

@@ -3,9 +3,9 @@
 Uses Claude LLM-as-judge to improve chart benchmark accuracy by handling
 semantic equivalence that deterministic fuzzy matching misses.
 
-Controlled by env var ``LLAMACLOUD_BENCH_LLM_NORMALIZATION``:
-  - ``"judge"`` -- Claude LLM-as-judge normalization (default)
-  - ``"off"``   -- no LLM normalization
+Off by default. Controlled by env var ``LLAMACLOUD_BENCH_LLM_NORMALIZATION``:
+  - unset / ``"off"`` -- no LLM normalization (default; fully deterministic)
+  - ``"judge"``       -- opt-in Claude LLM-as-judge normalization
 """
 
 from parse_bench.evaluation.metrics.parse.llm_normalization.base import (
