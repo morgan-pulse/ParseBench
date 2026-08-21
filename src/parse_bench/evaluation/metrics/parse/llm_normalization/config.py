@@ -7,7 +7,7 @@ from enum import StrEnum
 
 
 class NormalizationMode(StrEnum):
-    """LLM normalization mode, controlled by LLAMACLOUD_BENCH_LLM_NORMALIZATION env var."""
+    """LLM normalization mode (off by default; ``judge`` opts in)."""
 
     OFF = "off"
     JUDGE = "judge"
@@ -32,15 +32,11 @@ MAX_API_CALLS_PER_NORMALIZER = 500
 
 
 def get_normalization_mode() -> NormalizationMode:
-    """Read LLAMACLOUD_BENCH_LLM_NORMALIZATION env var and return the mode.
-
-    Returns NormalizationMode.JUDGE if unset or unrecognized.
-    """
-    raw = os.environ.get("LLAMACLOUD_BENCH_LLM_NORMALIZATION", "judge").strip().lower()
-    try:
-        return NormalizationMode(raw)
-    except ValueError:
+    """Read LLAMACLOUD_BENCH_LLM_NORMALIZATION; OFF unless set to ``judge``."""
+    raw = os.environ.get("LLAMACLOUD_BENCH_LLM_NORMALIZATION", "").strip().lower()
+    if raw == NormalizationMode.JUDGE.value:
         return NormalizationMode.JUDGE
+    return NormalizationMode.OFF
 
 
 def get_anthropic_api_key() -> str | None:

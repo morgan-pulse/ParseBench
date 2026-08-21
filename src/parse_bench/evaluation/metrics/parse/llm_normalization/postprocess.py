@@ -6,7 +6,7 @@ an LLM normalizer. This approach requires ZERO modifications to existing
 test rules — it works entirely on the rule_results dicts produced by the
 standard evaluation pipeline.
 
-Controlled by env var ``LLAMACLOUD_BENCH_LLM_NORMALIZATION`` (off by default).
+Off by default; opt in with ``LLAMACLOUD_BENCH_LLM_NORMALIZATION=judge``.
 """
 
 from __future__ import annotations

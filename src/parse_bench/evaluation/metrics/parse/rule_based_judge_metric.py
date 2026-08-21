@@ -6,8 +6,8 @@ returned metadata so the evaluator's per-type loop auto-generates
 ``rule_*_judge_pass_rate`` metrics. Also stores ``judge_pass_rate`` in
 metadata so the evaluator can emit ``rule_pass_rate_judge``.
 
-Controlled by env var ``LLAMACLOUD_BENCH_LLM_NORMALIZATION`` (off by default).
-When OFF this class is identical in behaviour to its parent.
+Off by default; opt in with ``LLAMACLOUD_BENCH_LLM_NORMALIZATION=judge``.
+When OFF (the default) this class is identical in behaviour to its parent.
 """
 
 from __future__ import annotations
