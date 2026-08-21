@@ -41,33 +41,122 @@ class ImageBackedPdfProviderSpec:
     execution: str
 
 
-# Authoritative inventory for local PDF-to-image parse providers. Tests derive
-# their provider matrices from this manifest and verify it against registered
-# provider decorators plus the page-rendering calls in provider source.
-IMAGE_BACKED_PDF_PROVIDERS = (
-    ImageBackedPdfProviderSpec("amazon_nova", "amazon_nova", "AmazonNovaProvider", 150, "direct"),
-    ImageBackedPdfProviderSpec("anthropic", "anthropic", "AnthropicProvider", 144, "direct"),
-    ImageBackedPdfProviderSpec("chandra2", "chandra2", "Chandra2Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("deepseekocr2", "deepseekocr2", "DeepSeekOCR2Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("dots_ocr_parse", "dots_ocr", "DotsOcrParseProvider", 144, "direct"),
-    ImageBackedPdfProviderSpec("falconocr", "falconocr", "FalconOcrProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("gemma4", "gemma4", "Gemma4Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("google", "google", "GoogleProvider", 144, "direct"),
-    ImageBackedPdfProviderSpec("granite_vision", "granite_vision", "GraniteVisionProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("infinity_parser2", "infinity_parser2", "InfinityParser2Provider", 300, "adapter"),
-    ImageBackedPdfProviderSpec("kdl_frontier_nano", "kdl_frontier_nano", "KdlFrontierNanoProvider", 144, "kdl"),
-    ImageBackedPdfProviderSpec("mineru25", "mineru25", "MinerU25Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("mineru2605pro", "mineru2605pro", "MinerU2605ProProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("mineru_diffusion", "mineru_diffusion", "MinerUDiffusionProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("nemotron_omni", "nemotron_omni", "NemotronOmniProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("openai", "openai", "OpenAIProvider", 144, "direct"),
-    ImageBackedPdfProviderSpec("paddleocr", "paddleocr", "PaddleOCRProvider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("qwen3_5", "qwen3_5", "Qwen35Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("surya2", "surya2", "Surya2Provider", 144, "adapter"),
-    ImageBackedPdfProviderSpec("tesseract", "tesseract", "TesseractProvider", 144, "direct"),
-    ImageBackedPdfProviderSpec("textract", "textract", "TextractProvider", 300, "direct"),
-    ImageBackedPdfProviderSpec("unlimitedocr", "unlimitedocr", "UnlimitedOCRProvider", 144, "adapter"),
+@dataclass(frozen=True)
+class ParseProviderPdfClassification:
+    """Explicit PDF execution classification for one registered parse provider."""
+
+    provider_name: str
+    module_name: str
+    class_name: str
+    pdf_handling: str
+    dpi: int | None = None
+    execution: str | None = None
+
+
+# Authoritative inventory for every registered parse provider. A provider is
+# either locally page-rasterized (and must declare its bounded execution path)
+# or explicitly classified as not locally page-rasterized. Coverage tests walk
+# registration decorators structurally, including imported aliases, so adding
+# any provider requires a deliberate entry here regardless of the raster API it
+# chooses.
+PARSE_PROVIDER_PDF_CLASSIFICATIONS = (
+    ParseProviderPdfClassification(
+        "amazon_nova", "amazon_nova", "AmazonNovaProvider", "local-page-raster", 150, "direct"
+    ),
+    ParseProviderPdfClassification("anthropic", "anthropic", "AnthropicProvider", "local-page-raster", 144, "direct"),
+    ParseProviderPdfClassification(
+        "azure_document_intelligence",
+        "azure_document_intelligence",
+        "AzureDocumentIntelligenceProvider",
+        "no-local-page-raster",
+    ),
+    ParseProviderPdfClassification("chandra2", "chandra2", "Chandra2Provider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("chunkr", "chunkr", "ChunkrProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification(
+        "databricks_ai_parse", "databricks_ai_parse", "DatabricksAiParseProvider", "no-local-page-raster"
+    ),
+    ParseProviderPdfClassification("datalab", "datalab", "DatalabProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification(
+        "deepseekocr2", "deepseekocr2", "DeepSeekOCR2Provider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification("docling_parse", "docling", "DoclingParseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("docling_serve", "docling_serve", "DoclingServeProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification(
+        "dots_ocr_parse", "dots_ocr", "DotsOcrParseProvider", "local-page-raster", 144, "direct"
+    ),
+    ParseProviderPdfClassification("extend_parse", "extend_parse", "ExtendParseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("falconocr", "falconocr", "FalconOcrProvider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("gemma4", "gemma4", "Gemma4Provider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("google", "google", "GoogleProvider", "local-page-raster", 144, "direct"),
+    ParseProviderPdfClassification("google_docai", "google_docai", "GoogleDocAIProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification(
+        "granite_vision", "granite_vision", "GraniteVisionProvider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification(
+        "infinity_parser2", "infinity_parser2", "InfinityParser2Provider", "local-page-raster", 300, "adapter"
+    ),
+    ParseProviderPdfClassification(
+        "kdl_frontier_nano", "kdl_frontier_nano", "KdlFrontierNanoProvider", "local-page-raster", 144, "kdl"
+    ),
+    ParseProviderPdfClassification("landingai", "landingai", "LandingAIParseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("liteparse", "liteparse", "LiteParseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("llamaparse", "llamaparse", "LlamaParseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("markitdown", "markitdown", "MarkItDownProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("mineru25", "mineru25", "MinerU25Provider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification(
+        "mineru2605pro", "mineru2605pro", "MinerU2605ProProvider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification(
+        "mineru_diffusion", "mineru_diffusion", "MinerUDiffusionProvider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification("mistral_ocr", "mistral_ocr", "MistralOCRProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification(
+        "nemotron_omni", "nemotron_omni", "NemotronOmniProvider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification("oi_parser", "oi_parser", "OIParserProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("openai", "openai", "OpenAIProvider", "local-page-raster", 144, "direct"),
+    ParseProviderPdfClassification(
+        "opendataloader", "opendataloader", "OpenDataLoaderProvider", "no-local-page-raster"
+    ),
+    ParseProviderPdfClassification("paddleocr", "paddleocr", "PaddleOCRProvider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("pdf_inspector", "pdf_inspector", "PdfInspectorProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("pulse", "pulse", "PulseProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("pymupdf", "pymupdf", "PyMuPDFProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("pymupdf4llm", "pymupdf4llm", "PyMuPDF4LLMProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("pypdf", "pypdf", "PyPDFProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("qwen3_5", "qwen3_5", "Qwen35Provider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("reducto", "reducto", "ReductoProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("surya2", "surya2", "Surya2Provider", "local-page-raster", 144, "adapter"),
+    ParseProviderPdfClassification("tesseract", "tesseract", "TesseractProvider", "local-page-raster", 144, "direct"),
+    ParseProviderPdfClassification("textract", "textract", "TextractProvider", "local-page-raster", 300, "direct"),
+    ParseProviderPdfClassification(
+        "unlimitedocr", "unlimitedocr", "UnlimitedOCRProvider", "local-page-raster", 144, "adapter"
+    ),
+    ParseProviderPdfClassification("unstructured", "unstructured", "UnstructuredProvider", "no-local-page-raster"),
+    ParseProviderPdfClassification("warp_ingest", "warp_ingest", "WarpIngestProvider", "no-local-page-raster"),
 )
+
+
+def _image_backed_provider_specs() -> tuple[ImageBackedPdfProviderSpec, ...]:
+    specs: list[ImageBackedPdfProviderSpec] = []
+    for classification in PARSE_PROVIDER_PDF_CLASSIFICATIONS:
+        if classification.pdf_handling != "local-page-raster":
+            continue
+        if classification.dpi is None or classification.execution is None:
+            raise ValueError(f"Incomplete local raster classification for {classification.provider_name}")
+        specs.append(
+            ImageBackedPdfProviderSpec(
+                classification.provider_name,
+                classification.module_name,
+                classification.class_name,
+                classification.dpi,
+                classification.execution,
+            )
+        )
+    return tuple(specs)
+
+
+IMAGE_BACKED_PDF_PROVIDERS = _image_backed_provider_specs()
 
 # Public operational-stat fields consumed by evaluation/stats.py. Totals are
 # additive across requests; per-page values are arithmetic means.

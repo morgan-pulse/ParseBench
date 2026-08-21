@@ -11,7 +11,10 @@ import pytest
 from PIL import Image
 
 from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
-from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
+from parse_bench.inference.providers.parse._multipage_image import (
+    IMAGE_BACKED_PDF_PROVIDERS,
+    PARSE_PROVIDER_PDF_CLASSIFICATIONS,
+)
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -125,6 +128,48 @@ def _mock_two_page_pdf(source: Path, monkeypatch: pytest.MonkeyPatch) -> list[Im
 
     monkeypatch.setattr("pdf2image.convert_from_path", render_page)
     return rendered
+
+
+def _qualified_name(expression: ast.expr, bindings: dict[str, str]) -> str | None:
+    if isinstance(expression, ast.Name):
+        return bindings.get(expression.id, expression.id)
+    if isinstance(expression, ast.Attribute):
+        parent = _qualified_name(expression.value, bindings)
+        return f"{parent}.{expression.attr}" if parent is not None else None
+    return None
+
+
+def _registered_provider_classes(tree: ast.Module) -> list[tuple[str, str]]:
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local_name = alias.asname or alias.name.split(".")[0]
+                bindings[local_name] = alias.name if alias.asname else local_name
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    registrations: list[tuple[str, str]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = _qualified_name(decorator.func, bindings)
+            if target not in {
+                "parse_bench.inference.register_provider",
+                "parse_bench.inference.providers.register_provider",
+                "parse_bench.inference.providers.registry.register_provider",
+            }:
+                continue
+            if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
+                continue
+            provider_name = decorator.args[0].value
+            if isinstance(provider_name, str):
+                registrations.append((provider_name, node.name))
+    return registrations
 
 
 @pytest.mark.parametrize(("module_name", "class_name", "expected_dpi"), ADAPTER_PROVIDERS)
@@ -326,41 +371,57 @@ def test_shared_rasterizer_bounds_every_convert_from_path_call() -> None:
     assert {keyword.arg for keyword in calls[0].keywords} >= {"first_page", "last_page"}
 
 
-def test_every_registered_local_pdf_raster_provider_is_classified() -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from parse_bench.inference.providers.registry import register_provider\n"
+        "@register_provider('sample')\nclass Sample: pass\n",
+        "from parse_bench.inference.providers.registry import register_provider as register\n"
+        "@register('sample')\nclass Sample: pass\n",
+        "import parse_bench.inference.providers.registry as registry\n"
+        "@registry.register_provider('sample')\nclass Sample: pass\n",
+        "from parse_bench.inference.providers import registry as provider_registry\n"
+        "@provider_registry.register_provider('sample')\nclass Sample: pass\n",
+    ],
+)
+def test_registered_provider_discovery_resolves_import_aliases(source: str) -> None:
+    assert _registered_provider_classes(ast.parse(source)) == [("sample", "Sample")]
+
+
+def test_every_registered_parse_provider_has_explicit_pdf_classification() -> None:
     provider_dir = Path(__file__).parents[5] / "src/parse_bench/inference/providers/parse"
     registered: dict[str, tuple[str, str]] = {}
-    raster_provider_names: set[str] = set()
 
     for source_path in provider_dir.glob("*.py"):
         tree = ast.parse(source_path.read_text())
-        module_registrations: list[tuple[str, str]] = []
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for decorator in node.decorator_list:
-                if (
-                    isinstance(decorator, ast.Call)
-                    and isinstance(decorator.func, ast.Name)
-                    and decorator.func.id == "register_provider"
-                    and decorator.args
-                    and isinstance(decorator.args[0], ast.Constant)
-                    and isinstance(decorator.args[0].value, str)
-                ):
-                    registration = (decorator.args[0].value, node.name)
-                    module_registrations.append(registration)
-                    registered[registration[0]] = (source_path.stem, registration[1])
+        for provider_name, class_name in _registered_provider_classes(tree):
+            assert provider_name not in registered
+            registered[provider_name] = (source_path.stem, class_name)
 
-        local_raster_calls = {
-            getattr(node.func, "id", getattr(node.func, "attr", None))
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
-        }
-        if local_raster_calls & {"run_pdf_pages", "open_document_page_images", "get_pixmap"}:
-            raster_provider_names.update(provider_name for provider_name, _ in module_registrations)
-
-    classified = {spec.provider_name for spec in IMAGE_BACKED_PDF_PROVIDERS}
-    assert classified == raster_provider_names
-    assert {spec.provider_name: (spec.module_name, spec.class_name) for spec in IMAGE_BACKED_PDF_PROVIDERS} == {
-        provider_name: registered[provider_name] for provider_name in classified
+    classified = {spec.provider_name: spec for spec in PARSE_PROVIDER_PDF_CLASSIFICATIONS}
+    assert len(classified) == len(PARSE_PROVIDER_PDF_CLASSIFICATIONS)
+    assert set(classified) == set(registered)
+    assert {
+        provider_name: (spec.module_name, spec.class_name) for provider_name, spec in classified.items()
+    } == registered
+    assert {spec.pdf_handling for spec in classified.values()} == {
+        "local-page-raster",
+        "no-local-page-raster",
     }
+    for spec in classified.values():
+        if spec.pdf_handling == "local-page-raster":
+            assert spec.dpi is not None
+            assert spec.execution in {"adapter", "direct", "kdl"}
+        else:
+            assert spec.dpi is None
+            assert spec.execution is None
+
+    local_raster = {
+        provider_name: (spec.module_name, spec.class_name)
+        for provider_name, spec in classified.items()
+        if spec.pdf_handling == "local-page-raster"
+    }
+    assert {
+        spec.provider_name: (spec.module_name, spec.class_name) for spec in IMAGE_BACKED_PDF_PROVIDERS
+    } == local_raster
     assert {spec.execution for spec in IMAGE_BACKED_PDF_PROVIDERS} == {"adapter", "direct", "kdl"}
