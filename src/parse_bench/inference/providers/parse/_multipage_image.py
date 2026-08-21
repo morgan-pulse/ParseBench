@@ -11,9 +11,10 @@ already implement page-wise inference should not use it.
 
 from __future__ import annotations
 
+import math
 import tempfile
 from collections.abc import Callable, Generator, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,56 @@ from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, R
 from parse_bench.schemas.product import ProductType
 
 _MULTIPAGE_KEY = "_parse_bench_multipage"
+
+# Public operational-stat fields consumed by evaluation/stats.py. Totals are
+# additive across requests; per-page values are arithmetic means.
+_ADDITIVE_STAT_FIELDS = (
+    "credits_used",
+    "cost_usd",
+    "input_cost_usd",
+    "tool_use_prompt_cost_usd",
+    "cached_input_cost_usd",
+    "output_and_thinking_cost_usd",
+    "cache_storage_cost_usd",
+    "input_tokens",
+    "tool_use_prompt_tokens",
+    "cached_content_tokens",
+    "output_tokens",
+    "total_tokens",
+    "thinking_tokens",
+    "num_api_calls",
+)
+_PER_PAGE_STAT_FIELDS = (
+    "cost_per_page_usd",
+    "input_tokens_per_page",
+    "tool_use_prompt_tokens_per_page",
+    "cached_content_tokens_per_page",
+    "output_tokens_per_page",
+)
+
+
+@contextmanager
+def close_derived_images(
+    original: Image.Image,
+) -> Iterator[Callable[[Image.Image], Image.Image]]:
+    """Track and close PIL images derived from a caller-owned image.
+
+    Providers may resize or convert a page several times before encoding it.
+    Every tracked derivative is closed on success and failure, while the
+    original page remains owned by the caller.
+    """
+
+    with ExitStack() as stack:
+        tracked: set[int] = set()
+
+        def track(image: Image.Image) -> Image.Image:
+            image_id = id(image)
+            if image is not original and image_id not in tracked:
+                stack.callback(image.close)
+                tracked.add(image_id)
+            return image
+
+        yield track
 
 
 class PageImages:
@@ -146,22 +197,61 @@ def run_pdf_pages(
                 )
 
     completed_at = datetime.now()
+    aggregate = _aggregate_page_raw_outputs(page_results)
     return RawInferenceResult(
         request=request,
         pipeline=pipeline,
         pipeline_name=pipeline.pipeline_name,
         product_type=request.product_type,
         raw_output={
+            **aggregate,
             _MULTIPAGE_KEY: {
                 "version": 1,
                 "num_pages": len(page_results),
                 "pages": page_results,
-            }
+            },
         },
         started_at=started_at,
         completed_at=completed_at,
         latency_in_ms=int((completed_at - started_at).total_seconds() * 1000),
     )
+
+
+def _aggregate_page_raw_outputs(page_results: list[dict[str, object]]) -> dict[str, int | float]:
+    """Project complete page-level operational metadata to the top level.
+
+    A field is omitted when any page is missing it, uses a non-numeric value,
+    or contains NaN/infinity. This avoids presenting partial totals as accurate
+    document totals while preserving heterogeneous provider payloads verbatim
+    inside the multipage envelope.
+    """
+
+    aggregate: dict[str, int | float] = {"num_pages": len(page_results)}
+    raw_outputs = [record.get("raw_output") for record in page_results]
+
+    for field in _ADDITIVE_STAT_FIELDS:
+        values = _complete_numeric_values(raw_outputs, field)
+        if values is not None:
+            aggregate[field] = sum(values)
+
+    for field in _PER_PAGE_STAT_FIELDS:
+        values = _complete_numeric_values(raw_outputs, field)
+        if values is not None:
+            aggregate[field] = sum(values) / len(values)
+
+    return aggregate
+
+
+def _complete_numeric_values(raw_outputs: list[object], field: str) -> list[int | float] | None:
+    values: list[int | float] = []
+    for raw_output in raw_outputs:
+        if not isinstance(raw_output, dict):
+            return None
+        value = raw_output.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return None
+        values.append(value)
+    return values or None
 
 
 def normalize_pdf_pages(

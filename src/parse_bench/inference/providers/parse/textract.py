@@ -1,6 +1,7 @@
 """Provider for AWS Textract document parsing."""
 
 import os
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -123,35 +124,42 @@ class TextractProvider(Provider):
 
         from PIL import Image
 
-        # Step 1: Resize if dimensions exceed limit
-        width, height = image.size
-        if width > self._MAX_DIMENSION or height > self._MAX_DIMENSION:
-            scale = min(self._MAX_DIMENSION / width, self._MAX_DIMENSION / height)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        with ExitStack() as derived_images:
+            original = image
 
-        # Step 2: Try PNG first
-        img_buffer = io.BytesIO()
-        image.save(img_buffer, format="PNG", optimize=True)
-        img_bytes = img_buffer.getvalue()
+            # Step 1: Resize if dimensions exceed limit
+            width, height = image.size
+            if width > self._MAX_DIMENSION or height > self._MAX_DIMENSION:
+                scale = min(self._MAX_DIMENSION / width, self._MAX_DIMENSION / height)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                if image is not original:
+                    derived_images.callback(image.close)
 
-        # Step 3: If still too large, progressively reduce size
-        scale = 0.9
-        while len(img_bytes) > self._TARGET_BYTES and scale > 0.3:
-            new_width = int(image.size[0] * scale)
-            new_height = int(image.size[1] * scale)
-            resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
+            # Step 2: Try PNG first
             img_buffer = io.BytesIO()
-            resized.save(img_buffer, format="PNG", optimize=True)
+            image.save(img_buffer, format="PNG", optimize=True)
             img_bytes = img_buffer.getvalue()
 
-            if len(img_bytes) <= self._TARGET_BYTES:
-                break
-            scale *= 0.9
+            # Step 3: If still too large, progressively reduce size
+            scale = 0.9
+            while len(img_bytes) > self._TARGET_BYTES and scale > 0.3:
+                new_width = int(image.size[0] * scale)
+                new_height = int(image.size[1] * scale)
+                resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                if resized is not original:
+                    derived_images.callback(resized.close)
 
-        return img_bytes
+                img_buffer = io.BytesIO()
+                resized.save(img_buffer, format="PNG", optimize=True)
+                img_bytes = img_buffer.getvalue()
+
+                if len(img_bytes) <= self._TARGET_BYTES:
+                    break
+                scale *= 0.9
+
+            return img_bytes
 
     def _analyze_document(self, file_path: str) -> dict[str, Any]:
         """

@@ -36,7 +36,10 @@ from parse_bench.inference.providers.parse._layout_utils import (
     items_to_markdown,
     parse_layout_blocks,
 )
-from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    close_derived_images,
+    open_document_page_images,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -248,38 +251,39 @@ class AmazonNovaProvider(Provider):
 
     def _image_to_jpeg_bytes(self, image: Image.Image) -> bytes:
         """Encode a PIL image as JPEG bytes within Nova's payload budget."""
-        image = self._prepare_image_for_api(image)
+        with close_derived_images(image) as track:
+            image = track(self._prepare_image_for_api(image))
 
-        if image.mode in ("RGBA", "P"):
-            image = image.convert("RGB")
+            if image.mode in ("RGBA", "P"):
+                image = track(image.convert("RGB"))
 
-        quality = 85
-        min_quality = 20
+            quality = 85
+            min_quality = 20
 
-        while quality >= min_quality:
-            buffer = io.BytesIO()
-            image.save(buffer, format="JPEG", quality=quality)
-            data = buffer.getvalue()
-            if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
-                return data
-            quality -= 10
+            while quality >= min_quality:
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=quality)
+                data = buffer.getvalue()
+                if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
+                    return data
+                quality -= 10
 
-        while True:
-            width, height = image.size
-            new_width, new_height = int(width * 0.8), int(height * 0.8)
-            if new_width < 100 or new_height < 100:
-                break
+            while True:
+                width, height = image.size
+                new_width, new_height = int(width * 0.8), int(height * 0.8)
+                if new_width < 100 or new_height < 100:
+                    break
 
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                image = track(image.resize((new_width, new_height), Image.Resampling.LANCZOS))
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=min_quality)
+                data = buffer.getvalue()
+                if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
+                    return data
+
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=min_quality)
-            data = buffer.getvalue()
-            if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
-                return data
-
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=min_quality)
-        return buffer.getvalue()
+            return buffer.getvalue()
 
     def _converse(self, image: Image.Image, system_prompt: str, user_prompt: str) -> tuple[str, dict[str, int], str]:
         """Send one page image to Bedrock Converse and return (text, usage, stop_reason)."""

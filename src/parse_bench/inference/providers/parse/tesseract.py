@@ -150,40 +150,39 @@ class TesseractProvider(Provider):
             ) from e
 
         try:
-            image = Image.open(image_path)
+            with Image.open(image_path) as image:
+                # Perform OCR
+                if self._output_type == "text":
+                    text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+                elif self._output_type == "dict":
+                    data = pytesseract.image_to_data(
+                        image, lang=self._lang, config=self._config, output_type=pytesseract.Output.DICT
+                    )
+                    text = " ".join([word for word in data.get("text", []) if word.strip()])
+                elif self._output_type == "data":
+                    text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
+                elif self._output_type == "boxes":
+                    text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
+                elif self._output_type == "osd":
+                    text = pytesseract.image_to_osd(image, config=self._config)
+                else:
+                    text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
 
-            # Perform OCR
-            if self._output_type == "text":
-                text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
-            elif self._output_type == "dict":
-                data = pytesseract.image_to_data(
-                    image, lang=self._lang, config=self._config, output_type=pytesseract.Output.DICT
-                )
-                text = " ".join([word for word in data.get("text", []) if word.strip()])
-            elif self._output_type == "data":
-                text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
-            elif self._output_type == "boxes":
-                text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
-            elif self._output_type == "osd":
-                text = pytesseract.image_to_osd(image, config=self._config)
-            else:
-                text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
-
-            return {
-                "pages": [
-                    {
-                        "page_index": 0,
-                        "text": text,
-                        "width": image.width,
-                        "height": image.height,
-                    }
-                ],
-                "num_pages": 1,
-                "config": {
-                    "lang": self._lang,
-                    "output_type": self._output_type,
-                },
-            }
+                return {
+                    "pages": [
+                        {
+                            "page_index": 0,
+                            "text": text,
+                            "width": image.width,
+                            "height": image.height,
+                        }
+                    ],
+                    "num_pages": 1,
+                    "config": {
+                        "lang": self._lang,
+                        "output_type": self._output_type,
+                    },
+                }
 
         except FileNotFoundError as e:
             raise ProviderPermanentError(f"Image file not found: {image_path}") from e

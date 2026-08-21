@@ -22,7 +22,10 @@ from parse_bench.inference.providers.parse._layout_utils import (
     resolve_layout_prompts,
     split_pdf_to_pages,
 )
-from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    close_derived_images,
+    open_document_page_images,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -210,52 +213,53 @@ class OpenAIProvider(Provider):
         - Images exceeding size limit after encoding (reduces quality iteratively)
         """
         # Resize if dimensions exceed limit
-        image = self._prepare_image_for_api(image)
+        with close_derived_images(image) as track:
+            image = track(self._prepare_image_for_api(image))
 
-        # Convert to RGB if necessary (e.g., RGBA images)
-        if image.mode in ("RGBA", "P"):
-            image = image.convert("RGB")
+            # Convert to RGB if necessary (e.g., RGBA images)
+            if image.mode in ("RGBA", "P"):
+                image = track(image.convert("RGB"))
 
-        # Try encoding with decreasing quality until under size limit
-        quality = 85
-        min_quality = 20
+            # Try encoding with decreasing quality until under size limit
+            quality = 85
+            min_quality = 20
 
-        while quality >= min_quality:
-            buffer = io.BytesIO()
-            image.save(buffer, format="JPEG", quality=quality)
-            buffer.seek(0)
-            data = buffer.getvalue()
+            while quality >= min_quality:
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=quality)
+                buffer.seek(0)
+                data = buffer.getvalue()
 
-            if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
-                return base64.standard_b64encode(data).decode("utf-8")
+                if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
+                    return base64.standard_b64encode(data).decode("utf-8")
 
-            quality -= 10
+                quality -= 10
 
-        # If still too large after quality reduction, resize the image
-        while True:
-            width, height = image.size
-            new_width = int(width * 0.8)
-            new_height = int(height * 0.8)
+            # If still too large after quality reduction, resize the image
+            while True:
+                width, height = image.size
+                new_width = int(width * 0.8)
+                new_height = int(height * 0.8)
 
-            if new_width < 100 or new_height < 100:
-                # Give up - image is too complex to fit in limits
-                break
+                if new_width < 100 or new_height < 100:
+                    # Give up - image is too complex to fit in limits
+                    break
 
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                image = track(image.resize((new_width, new_height), Image.Resampling.LANCZOS))
 
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=min_quality)
+                buffer.seek(0)
+                data = buffer.getvalue()
+
+                if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
+                    return base64.standard_b64encode(data).decode("utf-8")
+
+            # Final fallback - return what we have
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=min_quality)
             buffer.seek(0)
-            data = buffer.getvalue()
-
-            if len(data) <= self.MAX_IMAGE_SIZE_BYTES:
-                return base64.standard_b64encode(data).decode("utf-8")
-
-        # Final fallback - return what we have
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=min_quality)
-        buffer.seek(0)
-        return base64.standard_b64encode(buffer.getvalue()).decode("utf-8")
+            return base64.standard_b64encode(buffer.getvalue()).decode("utf-8")
 
     def _parse_image(self, image: Image.Image) -> tuple[str, dict[str, int]]:
         """

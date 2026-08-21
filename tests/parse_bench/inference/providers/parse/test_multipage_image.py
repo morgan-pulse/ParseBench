@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from parse_bench.evaluation.stats import build_operational_stats
 from parse_bench.inference.providers.base import ProviderPermanentError
 from parse_bench.inference.providers.parse._multipage_image import (
     normalize_pdf_pages,
@@ -74,7 +75,16 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
             pipeline=pipeline,
             pipeline_name=pipeline.pipeline_name,
             product_type=request.product_type,
-            raw_output={"markdown": f"page {page_number}"},
+            raw_output={
+                "markdown": f"page {page_number}",
+                "cost_usd": page_number / 10,
+                "cost_per_page_usd": page_number / 10,
+                "input_tokens": page_number * 10,
+                "input_tokens_per_page": page_number * 10,
+                "output_tokens": page_number,
+                "total_tokens": page_number * 11,
+                "num_api_calls": 1,
+            },
             started_at=now,
             completed_at=now,
             latency_in_ms=page_number,
@@ -106,6 +116,18 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
         rendered_pages[-1].getpixel((0, 0))
     # Raw artifacts must remain checkpoint-safe after temporary images disappear.
     json.dumps(raw_result.model_dump(mode="json"))
+    assert raw_result.raw_output["num_pages"] == 3
+    assert raw_result.raw_output["cost_usd"] == pytest.approx(0.6)
+    assert raw_result.raw_output["cost_per_page_usd"] == pytest.approx(0.2)
+    assert raw_result.raw_output["input_tokens"] == 60
+    assert raw_result.raw_output["input_tokens_per_page"] == 20
+    assert raw_result.raw_output["output_tokens"] == 6
+    assert raw_result.raw_output["total_tokens"] == 66
+    assert raw_result.raw_output["num_api_calls"] == 3
+
+    envelope = raw_result.raw_output["_parse_bench_multipage"]
+    assert isinstance(envelope, dict)
+    assert [page["raw_output"]["input_tokens"] for page in envelope["pages"]] == [10, 20, 30]
 
     def normalize_single_image(raw: RawInferenceResult) -> InferenceResult:
         markdown = raw.raw_output["markdown"]
@@ -137,6 +159,57 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
         (2, "page 3"),
     ]
     assert [page.page_number for page in result.output.layout_pages] == [1, 2, 3]
+
+    stats = {stat.name: stat for stat in build_operational_stats(result)}
+    assert stats["latency_ms_per_page"].value == pytest.approx(result.latency_in_ms / 3)
+    assert stats["cost_usd"].value == pytest.approx(0.6)
+    assert stats["cost_per_page_usd"].value == pytest.approx(0.2)
+    assert stats["input_tokens"].value == 60
+    assert stats["input_tokens_per_page"].value == 20
+    assert stats["num_api_calls"].value == 3
+
+
+def test_multipage_aggregation_omits_partial_or_invalid_provider_metadata(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), "white")],
+    )
+    page_number = 0
+
+    def run_single_image(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        nonlocal page_number
+        page_number += 1
+        now = datetime.now()
+        raw_output: dict[str, object] = {
+            "markdown": f"page {page_number}",
+            "input_tokens": 10 if page_number == 1 else "unknown",
+            "output_tokens": page_number,
+            "cost_usd": 0.1 if page_number == 1 else float("nan"),
+        }
+        if page_number == 1:
+            raw_output["num_api_calls"] = 1
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output=raw_output,
+            started_at=now,
+            completed_at=now,
+            latency_in_ms=1,
+        )
+
+    result = run_pdf_pages(_pipeline(), _request(source), dpi=144, run_single_image=run_single_image)
+
+    assert result is not None
+    assert result.raw_output["num_pages"] == 2
+    assert result.raw_output["output_tokens"] == 3
+    assert "input_tokens" not in result.raw_output
+    assert "cost_usd" not in result.raw_output
+    assert "num_api_calls" not in result.raw_output
 
 
 def test_pdf_render_failure_identifies_page_and_stops(tmp_path: Path, monkeypatch) -> None:
