@@ -38,6 +38,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
     parse_layout_blocks,
     resolve_layout_prompts,
 )
+from parse_bench.inference.providers.parse._multipage_image import normalize_pdf_pages, run_pdf_pages
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -266,6 +267,10 @@ class Gemma4Provider(Provider):
         return result
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        multipage_result = run_pdf_pages(pipeline, request, dpi=self._dpi, run_single_image=self.run_inference)
+        if multipage_result is not None:
+            return multipage_result
+
         if request.product_type != ProductType.PARSE:
             raise ProviderPermanentError(f"Gemma4Provider only supports PARSE, got {request.product_type}")
 
@@ -394,6 +399,10 @@ class Gemma4Provider(Provider):
     # ------------------------------------------------------------------
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
+        multipage_result = normalize_pdf_pages(raw_result, normalize_single_image=self.normalize)
+        if multipage_result is not None:
+            return multipage_result
+
         if raw_result.product_type != ProductType.PARSE:
             raise ProviderPermanentError(f"Gemma4Provider only supports PARSE, got {raw_result.product_type}")
 

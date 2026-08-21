@@ -27,6 +27,7 @@ from parse_bench.inference.providers.base import (
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._layout_utils import build_layout_pages
+from parse_bench.inference.providers.parse._multipage_image import normalize_pdf_pages, run_pdf_pages
 from parse_bench.inference.providers.parse.mistral_ocr import _convert_pipe_tables_to_html
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import ParseOutput
@@ -130,6 +131,10 @@ class UnlimitedOCRProvider(Provider):
         }
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        multipage_result = run_pdf_pages(pipeline, request, dpi=self._dpi, run_single_image=self.run_inference)
+        if multipage_result is not None:
+            return multipage_result
+
         if request.product_type != ProductType.PARSE:
             raise ProviderPermanentError(
                 f"UnlimitedOCRProvider only supports PARSE product type, got {request.product_type}"
@@ -265,6 +270,10 @@ class UnlimitedOCRProvider(Provider):
     }
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
+        multipage_result = normalize_pdf_pages(raw_result, normalize_single_image=self.normalize)
+        if multipage_result is not None:
+            return multipage_result
+
         if raw_result.product_type != ProductType.PARSE:
             raise ProviderPermanentError(
                 f"UnlimitedOCRProvider only supports PARSE product type, got {raw_result.product_type}"

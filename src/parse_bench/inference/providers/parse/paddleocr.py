@@ -17,6 +17,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import normalize_pdf_pages, run_pdf_pages
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -261,6 +262,10 @@ class PaddleOCRProvider(Provider):
         :return: Raw inference result
         :raises ProviderError: For any provider-related failures
         """
+        multipage_result = run_pdf_pages(pipeline, request, dpi=self._dpi, run_single_image=self.run_inference)
+        if multipage_result is not None:
+            return multipage_result
+
         if request.product_type != ProductType.PARSE:
             raise ProviderPermanentError(
                 f"PaddleOCRProvider only supports PARSE product type, got {request.product_type}"
@@ -461,6 +466,10 @@ class PaddleOCRProvider(Provider):
         :return: Inference result with both raw and normalized outputs
         :raises ProviderError: For any normalization failures
         """
+        multipage_result = normalize_pdf_pages(raw_result, normalize_single_image=self.normalize)
+        if multipage_result is not None:
+            return multipage_result
+
         if raw_result.product_type != ProductType.PARSE:
             raise ProviderPermanentError(
                 f"PaddleOCRProvider only supports PARSE product type, got {raw_result.product_type}"

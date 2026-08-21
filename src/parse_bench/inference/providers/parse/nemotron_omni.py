@@ -37,6 +37,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
     items_to_markdown,
     parse_layout_blocks,
 )
+from parse_bench.inference.providers.parse._multipage_image import normalize_pdf_pages, run_pdf_pages
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -116,8 +117,7 @@ class NemotronOmniProvider(Provider):
         server_url = self.base_config.get("server_url") or os.getenv("NEMOTRON_OMNI_SERVER_URL")
         if not server_url:
             raise ProviderConfigError(
-                "NemotronOmni provider requires 'server_url' in config or "
-                "NEMOTRON_OMNI_SERVER_URL in the environment."
+                "NemotronOmni provider requires 'server_url' in config or NEMOTRON_OMNI_SERVER_URL in the environment."
             )
         self._server_url: str = str(server_url)
 
@@ -270,6 +270,10 @@ class NemotronOmniProvider(Provider):
         return result
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        multipage_result = run_pdf_pages(pipeline, request, dpi=self._dpi, run_single_image=self.run_inference)
+        if multipage_result is not None:
+            return multipage_result
+
         if request.product_type != ProductType.PARSE:
             raise ProviderPermanentError(f"NemotronOmniProvider only supports PARSE, got {request.product_type}")
 
@@ -398,6 +402,10 @@ class NemotronOmniProvider(Provider):
     # ------------------------------------------------------------------
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
+        multipage_result = normalize_pdf_pages(raw_result, normalize_single_image=self.normalize)
+        if multipage_result is not None:
+            return multipage_result
+
         if raw_result.product_type != ProductType.PARSE:
             raise ProviderPermanentError(f"NemotronOmniProvider only supports PARSE, got {raw_result.product_type}")
 
