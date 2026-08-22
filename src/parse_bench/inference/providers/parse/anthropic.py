@@ -21,7 +21,7 @@ from parse_bench.inference.providers.base import (
 from parse_bench.inference.providers.parse._layout_utils import (
     build_layout_pages,
     items_to_markdown,
-    parse_layout_blocks,
+    parse_layout_response,
     resolve_layout_prompts,
     split_pdf_to_pages,
 )
@@ -144,6 +144,8 @@ class AnthropicProvider(Provider):
     capabilities to parse document content to markdown.
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the provider.
@@ -165,7 +167,7 @@ class AnthropicProvider(Provider):
 
         # Configuration
         self._model = self.base_config.get("model", "claude-haiku-4-5-20251001")
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._max_tokens = self.base_config.get("max_tokens", 8192)
         self._timeout = self.base_config.get("timeout", 120)
         self._mode = self.base_config.get("mode", "image")  # "image", "file", or "parse_with_layout"
@@ -204,7 +206,9 @@ class AnthropicProvider(Provider):
         try:
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=self._api_key)
+            # Retry exactly once at the active owner: per page for split modes,
+            # or in the outer document runner for native file mode.
+            self._client = anthropic.Anthropic(api_key=self._api_key, max_retries=0)
         except ImportError as e:
             raise ProviderConfigError("anthropic package not installed. Run: pip install anthropic") from e
 
@@ -227,11 +231,27 @@ class AnthropicProvider(Provider):
 
     @staticmethod
     def _extract_text(response) -> str:  # type: ignore[no-untyped-def]
-        """Extract text content from response, skipping any thinking blocks."""
-        for block in response.content or []:
+        """Extract non-empty text content, skipping any thinking blocks."""
+        content = getattr(response, "content", None)
+        if not content:
+            raise ProviderTransientError("Claude returned no content blocks")
+        text_parts: list[str] = []
+        for block in content:
             if getattr(block, "type", None) == "text":
-                return getattr(block, "text", "")
-        return ""
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    text_parts.append(text)
+        text = "".join(text_parts)
+        if not text.strip():
+            raise ProviderTransientError("Claude returned no non-empty text content")
+        return text
+
+    @staticmethod
+    def _parse_layout_response(text: str) -> list[dict[str, Any]]:
+        try:
+            return parse_layout_response(text)
+        except ValueError as exc:
+            raise ProviderTransientError(f"Claude returned malformed layout output: {exc}") from exc
 
     @staticmethod
     def _extract_usage(response) -> dict[str, int]:  # type: ignore[no-untyped-def]
@@ -397,6 +417,8 @@ class AnthropicProvider(Provider):
             content = self._extract_text(response)
             return content, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -452,9 +474,11 @@ class AnthropicProvider(Provider):
             usage = self._extract_usage(response)
             text = self._extract_text(response)
 
-            items = parse_layout_blocks(text)
+            items = self._parse_layout_response(text)
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -521,6 +545,8 @@ class AnthropicProvider(Provider):
             content = self._extract_text(response)
             return content, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -577,9 +603,11 @@ class AnthropicProvider(Provider):
             usage = self._extract_usage(response)
             text = self._extract_text(response)
 
-            items = parse_layout_blocks(text)
+            items = self._parse_layout_response(text)
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -651,7 +679,11 @@ class AnthropicProvider(Provider):
                     pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(pdf_pages):
-                        items, raw_content, usage = self._parse_pdf_page_with_layout(pdf_bytes)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_pdf_page_with_layout, pdf_bytes),
+                            provider_name=pipeline.provider_name,
+                            page_number=page_index + 1,
+                        )
                         page_usages.append(usage)
                         pages.append(
                             {
@@ -666,7 +698,11 @@ class AnthropicProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based layout parsing
                     with Image.open(source_path) as image:
-                        items, raw_content, usage = self._parse_image_with_layout(image)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_image_with_layout, image),
+                            provider_name=pipeline.provider_name,
+                            page_number=1,
+                        )
                         page_usages.append(usage)
                         pages = [
                             {

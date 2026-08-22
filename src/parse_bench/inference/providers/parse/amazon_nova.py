@@ -106,6 +106,8 @@ class AmazonNovaProvider(Provider):
     the markdown and the per-element bounding boxes.
     """
 
+    PDF_RENDER_DPI = 150
+
     # Nova image-understanding limits: 8,000 x 8,000 px, 25 MB total request
     # payload. Images are base64-encoded on the wire, so the raw byte budget is
     # 3/4 of the payload cap.
@@ -137,7 +139,7 @@ class AmazonNovaProvider(Provider):
 
         self._model: str = self.base_config.get("model", "us.amazon.nova-2-lite-v1:0")
         self._region: str = self.base_config.get("region") or os.environ.get("AWS_REGION") or "us-east-1"
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._max_tokens = self.base_config.get("max_tokens", 8192)
         self._timeout = self.base_config.get("timeout", 300)
         self._reasoning_effort = self.base_config.get("reasoning_effort", None)
@@ -175,7 +177,9 @@ class AmazonNovaProvider(Provider):
                 config=Config(
                     read_timeout=self._timeout,
                     connect_timeout=30,
-                    retries={"max_attempts": 3, "mode": "standard"},
+                    # run_page_with_retries owns the complete retry budget for
+                    # each billable page; botocore performs one HTTP attempt.
+                    retries={"total_max_attempts": 1, "mode": "standard"},
                 ),
             )
         except ImportError as e:

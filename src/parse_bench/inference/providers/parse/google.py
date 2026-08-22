@@ -19,7 +19,7 @@ from parse_bench.inference.providers.base import (
 from parse_bench.inference.providers.parse._layout_utils import (
     build_layout_pages,
     items_to_markdown,
-    parse_layout_blocks,
+    parse_layout_response,
     resolve_layout_prompts,
     split_pdf_to_pages,
     swap_gemini_bbox,
@@ -121,6 +121,8 @@ class GoogleProvider(Provider):
     capabilities to parse document content to markdown.
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the provider.
@@ -145,7 +147,7 @@ class GoogleProvider(Provider):
 
         # Configuration
         self._model = self.base_config.get("model", "gemini-3-flash-preview")
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._max_tokens = self.base_config.get("max_tokens", 8192)
         self._timeout = self.base_config.get("timeout", 120)
         self._thinking_level = self.base_config.get("thinking_level", None)
@@ -183,7 +185,12 @@ class GoogleProvider(Provider):
             from google import genai
             from google.genai import types
 
-            self._client = genai.Client(api_key=self._api_key)
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options=types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
             self._types = types
         except ImportError as e:
             raise ProviderConfigError("google-genai package not installed. Run: pip install google-genai") from e
@@ -555,7 +562,10 @@ class GoogleProvider(Provider):
             if text is None:
                 raise ProviderTransientError(f"Gemini API returned no layout text: {self._failure_reason(response)}")
 
-            items = swap_gemini_bbox(parse_layout_blocks(text))
+            try:
+                items = swap_gemini_bbox(parse_layout_response(text))
+            except ValueError as exc:
+                raise ProviderTransientError(f"Gemini returned malformed layout output: {exc}") from exc
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -573,8 +583,8 @@ class GoogleProvider(Provider):
         Send raw PDF file to Gemini using inline data.
 
         Uses Gemini's document understanding capability to process
-        the PDF directly without converting to images. Retries once
-        if the response is empty.
+        the PDF directly without converting to images. The document runner
+        owns retries for this whole-document operation.
 
         :param pdf_path: Path to the PDF file
         :return: Tuple of (markdown content, usage dict)
@@ -616,21 +626,7 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                reason1 = self._failure_reason(response)
-                # Single retry on empty response
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=contents,
-                    config=gen_config,
-                )
-                usage = self._extract_usage(response)
-                text = self._extract_text(response)
-
-            if text is None:
-                reason2 = self._failure_reason(response)
-                raise ProviderTransientError(
-                    f"Gemini API returned no PDF text after 2 attempts: 1st={reason1}, 2nd={reason2}"
-                )
+                raise ProviderTransientError(f"Gemini API returned no PDF text: {self._failure_reason(response)}")
             return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -681,22 +677,14 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                reason1 = self._failure_reason(response)
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=contents,
-                    config=gen_config,
-                )
-                usage = self._extract_usage(response)
-                text = self._extract_text(response)
-
-            if text is None:
-                reason2 = self._failure_reason(response)
                 raise ProviderTransientError(
-                    f"Gemini API returned no PDF layout text after 2 attempts: 1st={reason1}, 2nd={reason2}"
+                    f"Gemini API returned no PDF layout text: {self._failure_reason(response)}"
                 )
 
-            items = swap_gemini_bbox(parse_layout_blocks(text))
+            try:
+                items = swap_gemini_bbox(parse_layout_response(text))
+            except ValueError as exc:
+                raise ProviderTransientError(f"Gemini returned malformed PDF layout output: {exc}") from exc
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -770,7 +758,11 @@ class GoogleProvider(Provider):
                     layout_pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(layout_pdf_pages):
-                        items, raw_content, usage = self._parse_pdf_page_with_layout(pdf_bytes)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_pdf_page_with_layout, pdf_bytes),
+                            provider_name=pipeline.provider_name,
+                            page_number=page_index + 1,
+                        )
                         page_usages.append(usage)
                         pages.append(
                             {
@@ -785,7 +777,11 @@ class GoogleProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based layout parsing
                     with Image.open(source_path) as image:
-                        items, raw_content, usage = self._parse_image_with_layout(image)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_image_with_layout, image),
+                            provider_name=pipeline.provider_name,
+                            page_number=1,
+                        )
                         page_usages.append(usage)
                         pages = [
                             {

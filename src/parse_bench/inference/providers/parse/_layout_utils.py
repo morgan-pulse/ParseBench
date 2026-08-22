@@ -68,7 +68,7 @@ USER_PROMPT_LAYOUT = (
     "Use HTML tables for any tabular data. "
     "For charts/graphs, use flat combined column headers. "
     "Output ONLY the parsed content with div wrappers, "
-    "no explanations."
+    "no explanations. If the page is genuinely blank, output exactly []."
 )
 
 # ---------------------------------------------------------------------------
@@ -434,6 +434,22 @@ def parse_layout_blocks(content: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse bbox: {bbox_str}")
 
+    return blocks
+
+
+def parse_layout_response(content: str) -> list[dict[str, Any]]:
+    """Parse a complete layout response and reject malformed output.
+
+    An explicit empty JSON array is the only empty representation accepted by
+    the layout protocol. It proves that the model returned a structured blank
+    page rather than no output. Any other response must contain at least one
+    valid layout wrapper.
+    """
+    if content.strip() == "[]":
+        return []
+    blocks = parse_layout_blocks(content)
+    if not blocks:
+        raise ValueError("layout response contains no valid layout elements")
     return blocks
 
 

@@ -19,7 +19,7 @@ from parse_bench.inference.providers.base import (
 from parse_bench.inference.providers.parse._layout_utils import (
     build_layout_pages,
     items_to_markdown,
-    parse_layout_blocks,
+    parse_layout_response,
     resolve_layout_prompts,
     split_pdf_to_pages,
 )
@@ -104,6 +104,8 @@ class OpenAIProvider(Provider):
     capabilities to parse document content to markdown.
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the provider.
@@ -127,7 +129,7 @@ class OpenAIProvider(Provider):
 
         # Configuration
         self._model = self.base_config.get("model", "gpt-5-mini")
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._max_tokens = self.base_config.get("max_tokens", 8192)
         self._timeout = self.base_config.get("timeout", 120)
         self._reasoning_effort = self.base_config.get("reasoning_effort", None)
@@ -149,7 +151,9 @@ class OpenAIProvider(Provider):
         try:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=self._api_key)
+            # Retry exactly once at the active owner: per page for split modes,
+            # or in the outer document runner for native file mode.
+            self._client = OpenAI(api_key=self._api_key, max_retries=0)
         except ImportError as e:
             raise ProviderConfigError("openai package not installed. Run: pip install openai") from e
 
@@ -302,9 +306,10 @@ class OpenAIProvider(Provider):
             usage = self._extract_usage(response)
 
             # Extract text from response
-            content = response.choices[0].message.content if response.choices else ""
-            return (content or ""), usage
+            return self._extract_response_text(response, context="image"), usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -349,12 +354,12 @@ class OpenAIProvider(Provider):
             response = self._client.chat.completions.create(**kwargs)
 
             usage = self._extract_usage(response)
-            content = response.choices[0].message.content if response.choices else ""
-            text = content or ""
-
-            items = parse_layout_blocks(text)
+            text = self._extract_response_text(response, context="image layout")
+            items = self._parse_layout_response(text)
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -410,9 +415,10 @@ class OpenAIProvider(Provider):
             usage = self._extract_usage(response)
 
             # Extract text from response
-            content = response.choices[0].message.content if response.choices else ""
-            return (content or ""), usage
+            return self._extract_response_text(response, context="PDF"), usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -458,12 +464,12 @@ class OpenAIProvider(Provider):
             response = self._client.chat.completions.create(**kwargs)
 
             usage = self._extract_usage(response)
-            content = response.choices[0].message.content if response.choices else ""
-            text = content or ""
-
-            items = parse_layout_blocks(text)
+            text = self._extract_response_text(response, context="PDF layout page")
+            items = self._parse_layout_response(text)
             return items, text, usage
 
+        except (ProviderPermanentError, ProviderTransientError):
+            raise
         except Exception as e:
             error_str = str(e).lower()
             if any(kw in error_str for kw in ["timeout", "connection", "network"]):
@@ -478,6 +484,27 @@ class OpenAIProvider(Provider):
             if is_gpt56_401_blip:
                 raise ProviderTransientError(f"Transient OpenAI 401 (retryable): {e}") from e
             raise ProviderPermanentError(f"Error calling OpenAI API: {e}") from e
+
+    @staticmethod
+    def _extract_response_text(response: Any, *, context: str) -> str:
+        """Return non-empty message text from a structurally valid response."""
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise ProviderTransientError(f"OpenAI returned no choices for {context}")
+        message = getattr(choices[0], "message", None)
+        if message is None or not hasattr(message, "content"):
+            raise ProviderTransientError(f"OpenAI returned no message content for {context}")
+        content = message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderTransientError(f"OpenAI returned empty message content for {context}")
+        return content
+
+    @staticmethod
+    def _parse_layout_response(text: str) -> list[dict[str, Any]]:
+        try:
+            return parse_layout_response(text)
+        except ValueError as exc:
+            raise ProviderTransientError(f"OpenAI returned malformed layout output: {exc}") from exc
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
         """
@@ -540,7 +567,11 @@ class OpenAIProvider(Provider):
                     pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(pdf_pages):
-                        items, raw_content, usage = self._parse_pdf_page_with_layout(pdf_bytes)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_pdf_page_with_layout, pdf_bytes),
+                            provider_name=pipeline.provider_name,
+                            page_number=page_index + 1,
+                        )
                         page_usages.append(usage)
                         pages.append(
                             {
@@ -555,7 +586,11 @@ class OpenAIProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based layout parsing
                     with Image.open(source_path) as image:
-                        items, raw_content, usage = self._parse_image_with_layout(image)
+                        items, raw_content, usage = run_page_with_retries(
+                            partial(self._parse_image_with_layout, image),
+                            provider_name=pipeline.provider_name,
+                            page_number=1,
+                        )
                         page_usages.append(usage)
                         pages = [
                             {

@@ -13,7 +13,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from openai import OpenAI
 from PIL import Image
@@ -23,6 +23,7 @@ from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
     ProviderPermanentError,
+    ProviderRateLimitError,
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
@@ -144,6 +145,8 @@ class DotsOcrParseProvider(Provider):
         - prompt_override (str, optional): Custom prompt text (overrides prompt_mode)
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(
         self,
         provider_name: str,
@@ -161,12 +164,13 @@ class DotsOcrParseProvider(Provider):
         self._client = OpenAI(
             base_url=endpoint_url,
             api_key=os.getenv("DOTS_OCR_API_KEY", "not-needed"),
+            max_retries=0,
         )
 
         self._model = self.base_config.get("model", SERVED_MODEL_NAME)
         self._timeout = self.base_config.get("timeout", 180)
         self._max_tokens = self.base_config.get("max_tokens", 16384)
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._temperature = self.base_config.get("temperature", 0.1)
         self._top_p = self.base_config.get("top_p", 0.9)
 
@@ -221,15 +225,29 @@ class DotsOcrParseProvider(Provider):
                 top_p=self._top_p,
             )
         except Exception as e:
-            error_msg = str(e).lower()
-            if "timeout" in error_msg or "connection" in error_msg:
-                raise ProviderTransientError(f"API call failed: {e}") from e
-            raise ProviderPermanentError(f"API call failed: {e}") from e
+            self._raise_api_error(e)
 
         content = response.choices[0].message.content
         if not content:
             raise ProviderPermanentError("Empty response from model")
         return cast(str, content)
+
+    @staticmethod
+    def _raise_api_error(exc: Exception) -> NoReturn:
+        """Classify real OpenAI-compatible transport and HTTP failures."""
+        from openai import APIConnectionError, APITimeoutError
+
+        if isinstance(exc, (APITimeoutError, APIConnectionError, TimeoutError, ConnectionError)):
+            raise ProviderTransientError(f"Transient dots.ocr API failure: {exc}") from exc
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 429:
+            raise ProviderRateLimitError(f"dots.ocr rate limited (429): {exc}") from exc
+        if status_code == 408 or isinstance(status_code, int) and status_code >= 500:
+            raise ProviderTransientError(f"Transient dots.ocr HTTP {status_code}: {exc}") from exc
+        raise ProviderPermanentError(f"Permanent dots.ocr API failure: {exc}") from exc
 
     # ------------------------------------------------------------------
     # HTML sanitization
