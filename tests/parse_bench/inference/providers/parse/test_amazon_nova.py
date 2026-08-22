@@ -77,6 +77,29 @@ def test_unknown_model_falls_back_to_zero_pricing() -> None:
     assert _provider(_model="us.amazon.nova-9-mystery-v1:0")._get_pricing() == (0.0, 0.0)
 
 
+def test_constructor_disables_botocore_retries_and_uses_declared_dpi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import boto3
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+
+    def client(service_name: str, **kwargs: Any) -> object:
+        captured["service_name"] = service_name
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(boto3, "client", client)
+
+    provider = AmazonNovaProvider("amazon_nova")
+
+    assert provider._dpi == AmazonNovaProvider.PDF_RENDER_DPI == 150
+    assert captured["service_name"] == "bedrock-runtime"
+    assert captured["config"].retries == {"total_max_attempts": 1, "mode": "standard"}
+
+
 def test_converse_sends_temperature_and_no_reasoning_by_default() -> None:
     provider = _provider()
     provider._client = _FakeBedrockClient(

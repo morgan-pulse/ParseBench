@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from PIL import Image
@@ -329,3 +329,65 @@ def test_layout_file_malformed_page_two_aborts_document_atomically_through_respo
         successful_result = provider.run_inference(_pipeline(module_name), _request(source))
 
     assert successful_result is None
+
+
+def test_openai_and_anthropic_sdk_retries_are_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, dict[str, object]] = {}
+    openai_sdk = importlib.import_module("openai")
+    anthropic_sdk = importlib.import_module("anthropic")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        openai_sdk,
+        "OpenAI",
+        lambda **kwargs: captured.setdefault("openai", kwargs),
+    )
+    monkeypatch.setattr(
+        anthropic_sdk,
+        "Anthropic",
+        lambda **kwargs: captured.setdefault("anthropic", kwargs),
+    )
+
+    openai_module = importlib.import_module("parse_bench.inference.providers.parse.openai")
+    anthropic_module = importlib.import_module("parse_bench.inference.providers.parse.anthropic")
+    openai_provider = openai_module.OpenAIProvider("openai")
+    anthropic_provider = anthropic_module.AnthropicProvider("anthropic")
+
+    assert captured["openai"]["max_retries"] == 0
+    assert captured["anthropic"]["max_retries"] == 0
+    assert openai_provider._dpi == openai_module.OpenAIProvider.PDF_RENDER_DPI == 150
+    assert anthropic_provider._dpi == anthropic_module.AnthropicProvider.PDF_RENDER_DPI == 150
+
+
+def test_google_sdk_and_dots_compatible_client_use_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict[str, object]] = {}
+    google_module = importlib.import_module("parse_bench.inference.providers.parse.google")
+    dots_module = importlib.import_module("parse_bench.inference.providers.parse.dots_ocr")
+    genai = importlib.import_module("google.genai")
+
+    monkeypatch.setenv("GOOGLE_GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        genai,
+        "Client",
+        lambda **kwargs: captured.setdefault("google", kwargs),
+    )
+    monkeypatch.setattr(
+        dots_module,
+        "OpenAI",
+        lambda **kwargs: captured.setdefault("dots", kwargs),
+    )
+
+    google_provider = google_module.GoogleProvider("google")
+    dots_provider = dots_module.DotsOcrParseProvider(
+        "dots_ocr_parse",
+        {"endpoint_url": "https://dots.invalid/v1"},
+    )
+
+    http_options = cast(Any, captured["google"]["http_options"])
+    assert http_options.retry_options.attempts == 1
+    assert captured["dots"]["max_retries"] == 0
+    assert google_provider._dpi == google_module.GoogleProvider.PDF_RENDER_DPI == 150
+    assert dots_provider._dpi == dots_module.DotsOcrParseProvider.PDF_RENDER_DPI == 150
