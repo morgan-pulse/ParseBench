@@ -165,3 +165,12 @@ def test_divergent_baseline_uses_merge_base_for_diff_and_archive(tmp_path: Path)
     checker._extract_baseline(repo, merge_base, extracted)
     assert (extracted / "sample.py").read_text() == "base = 1\n"
     assert checker._added_line_ranges(repo, merge_base, ["sample.py"]) == {"sample.py": [range(1, 2)]}
+
+
+def test_github_actions_gate_runs_checker_against_fetched_origin_main() -> None:
+    workflow = Path(__file__).parents[1] / ".github/workflows/static-quality-delta.yml"
+    content = workflow.read_text()
+
+    assert "fetch-depth: 0" in content
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in content
+    assert "scripts/check_static_quality_delta.py --baseline origin/main" in content
