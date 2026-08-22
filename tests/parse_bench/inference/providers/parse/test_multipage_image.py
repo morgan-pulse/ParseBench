@@ -102,6 +102,33 @@ def test_async_timeout_drain_awaits_running_worker_termination() -> None:
         asyncio.run(exercise(future))
 
 
+def test_async_timeout_drain_propagates_caller_cancellation() -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace()
+    started = threading.Event()
+    release = threading.Event()
+
+    def worker() -> str:
+        started.set()
+        release.wait()
+        return "late-success"
+
+    async def exercise(future: concurrent.futures.Future[str]) -> None:
+        drain = asyncio.create_task(runner._cancel_inflight_and_drain_async("document", future))
+        await asyncio.sleep(0.05)
+        assert not drain.done()
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        release.set()
+        assert await asyncio.wrap_future(future) == "late-success"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker)
+        assert started.wait(timeout=1)
+        asyncio.run(exercise(future))
+
+
 def test_sync_timeout_adopts_late_success_without_resubmission(tmp_path: Path) -> None:
     runner = object.__new__(InferenceRunner)
     runner.provider = SimpleNamespace()

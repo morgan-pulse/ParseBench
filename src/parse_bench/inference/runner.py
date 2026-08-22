@@ -278,7 +278,7 @@ class InferenceRunner:
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
             return await asyncio.shield(asyncio.wrap_future(future))
-        except (concurrent.futures.CancelledError, asyncio.CancelledError, Exception):
+        except Exception:
             return None
 
     @staticmethod
@@ -686,7 +686,7 @@ class InferenceRunner:
 
     def _process_document(
         self, pdf_path: Path, example_id: str, product_type: ProductType
-    ) -> tuple[RawInferenceResult | None, InferenceResult | None, str | None]:
+    ) -> tuple[RawInferenceResult | None, InferenceResult | None, str | tuple[str, str, str] | None]:
         """
         Process a single document (synchronous).
 
@@ -743,7 +743,7 @@ class InferenceRunner:
                 self.job_statuses[example_id].status = "failed"
                 self.job_statuses[example_id].error = error_msg
                 self.job_statuses[example_id].completed_at = datetime.now()
-            return None, None, (error_msg, error_traceback, type(e).__name__)  # type: ignore[return-value]
+            return None, None, (error_msg, error_traceback, type(e).__name__)
         except Exception as e:
             import traceback
 
@@ -755,11 +755,11 @@ class InferenceRunner:
                 self.job_statuses[example_id].status = "failed"
                 self.job_statuses[example_id].error = error_msg
                 self.job_statuses[example_id].completed_at = datetime.now()
-            return None, None, (error_msg, error_traceback, type(e).__name__)  # type: ignore[return-value]
+            return None, None, (error_msg, error_traceback, type(e).__name__)
 
     def _process_test_case(
         self, test_case: TestCase, product_type: ProductType
-    ) -> tuple[RawInferenceResult | None, InferenceResult | None, str | None]:
+    ) -> tuple[RawInferenceResult | None, InferenceResult | None, str | tuple[str, str, str] | None]:
         """
         Process a single test case (synchronous).
 
@@ -829,7 +829,7 @@ class InferenceRunner:
                 self.job_statuses[test_case.test_id].status = "failed"
                 self.job_statuses[test_case.test_id].error = error_msg
                 self.job_statuses[test_case.test_id].completed_at = datetime.now()
-            return None, None, (error_msg, error_traceback, type(e).__name__)  # type: ignore[return-value]
+            return None, None, (error_msg, error_traceback, type(e).__name__)
         except Exception as e:
             import traceback
 
@@ -841,7 +841,7 @@ class InferenceRunner:
                 self.job_statuses[test_case.test_id].status = "failed"
                 self.job_statuses[test_case.test_id].error = error_msg
                 self.job_statuses[test_case.test_id].completed_at = datetime.now()
-            return None, None, (error_msg, error_traceback, type(e).__name__)  # type: ignore[return-value]
+            return None, None, (error_msg, error_traceback, type(e).__name__)
 
     def _run_files_sync(
         self,
