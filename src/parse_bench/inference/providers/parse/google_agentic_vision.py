@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image
 
@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 TRANSIENT_ERROR_KEYWORDS = ("timeout", "connection", "network")
 RATE_LIMIT_ERROR_KEYWORDS = ("rate_limit", "rate limit", "429", "resource_exhausted")
+_TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_STATUS_NAME_CODES = {
+    "request_timeout": 408,
+    "deadline_exceeded": 504,
+    "resource_exhausted": 429,
+    "internal": 500,
+    "internal_server_error": 500,
+    "bad_gateway": 502,
+    "unavailable": 503,
+    "service_unavailable": 503,
+    "gateway_timeout": 504,
+}
 
 CORE11_LABELS = [
     "Caption",
@@ -55,6 +67,7 @@ SYSTEM_PROMPT_AGENTIC_VISION = (
     "- data-label must be one of: Caption, Footnote, Formula, List-item, Page-footer, "
     "Page-header, Picture, Section-header, Table, Text, Title.\n"
     "- Every piece of content must be inside exactly one <div> wrapper.\n"
+    "- If and only if the page is visually blank, return exactly [] with no wrappers or other text.\n"
     "- Start from the full page image and preserve reading order from that full-page view.\n"
     "- First try to read and ground content from the full page image.\n"
     "- If you zoom, crop, rotate, or enhance the page using code execution, always convert the final box "
@@ -88,6 +101,7 @@ USER_PROMPT_AGENTIC_VISION_PREFIX = (
     "After inspection, return the wrapped markdown as assistant text. If you must use code for the final step, "
     "print only one raw triple-quoted string containing the wrapped markdown and nothing else.\n"
     "Output ONLY the wrapped content, no explanations.\n"
+    "For a visually blank page, output exactly [] and nothing else.\n"
 )
 
 RETRY_PROMPT_RECITATION = (
@@ -417,6 +431,9 @@ def _normalize_bbox_2d(value: object) -> list[int]:
 
 def parse_agentic_layout_blocks(content: str) -> AgenticVisionPageResponse:
     """Parse wrapped layout blocks using Gemini-native y-first bbox ordering."""
+    if content.strip() == "[]":
+        return AgenticVisionPageResponse(raw_content="", items=[])
+
     raw_matches: list[tuple[int, list[int], str, str, str]] = []
 
     for match in _PATTERN_BBOX_FIRST.finditer(content):
@@ -459,7 +476,7 @@ def parse_page_response(response: Any) -> AgenticVisionPageResponse:
     errors: list[str] = []
     for payload in _candidate_layout_payloads(response):
         parsed = parse_agentic_layout_blocks(payload)
-        if parsed.items:
+        if parsed.items or payload.strip() == "[]":
             return parsed
         errors.append("No wrapped layout blocks found")
 
@@ -496,8 +513,19 @@ def build_layout_pages_from_agentic_items(
     page_number: int,
 ) -> tuple[str, list[ParseLayoutPageIR]]:
     """Convert wrapped Agentic Vision items to page markdown and ParseLayoutPageIR."""
-    if not items_data or not image_width or not image_height:
+    if not image_width or not image_height:
         return "", []
+
+    if not items_data:
+        return "", [
+            ParseLayoutPageIR(
+                page_number=page_number,
+                width=float(image_width),
+                height=float(image_height),
+                md="",
+                items=[],
+            )
+        ]
 
     markdown = items_to_markdown(items_data)
     layout_items: list[LayoutItemIR] = []
@@ -839,9 +867,50 @@ def extract_usage_from_response(response: Any) -> dict[str, int]:
 
 def classify_gemini_api_exception(exc: Exception) -> Exception:
     """Classify raw SDK exceptions into retryable provider errors when possible."""
+    status_code = _extract_gemini_status_code(exc)
+    if status_code == 429:
+        return cast(Exception, ProviderTransientError(f"Rate limited: {exc}"))
+    if status_code in _TRANSIENT_STATUS_CODES or (status_code is not None and status_code >= 500):
+        return cast(Exception, ProviderTransientError(f"Transient error calling Gemini API: {exc}"))
+    if status_code is not None and 400 <= status_code < 500:
+        return cast(Exception, ProviderPermanentError(f"Error calling Gemini API: {exc}"))
+
     error_str = str(exc).lower()
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return cast(Exception, ProviderTransientError(f"Transient error calling Gemini API: {exc}"))
     if any(keyword in error_str for keyword in TRANSIENT_ERROR_KEYWORDS):
-        return ProviderTransientError(f"Transient error calling Gemini API: {exc}")
+        return cast(Exception, ProviderTransientError(f"Transient error calling Gemini API: {exc}"))
     if any(keyword in error_str for keyword in RATE_LIMIT_ERROR_KEYWORDS):
-        return ProviderTransientError(f"Rate limited: {exc}")
-    return ProviderPermanentError(f"Error calling Gemini API: {exc}")
+        return cast(Exception, ProviderTransientError(f"Rate limited: {exc}"))
+    return cast(Exception, ProviderPermanentError(f"Error calling Gemini API: {exc}"))
+
+
+def _extract_gemini_status_code(exc: Exception) -> int | None:
+    """Extract an HTTP-like status from Google SDK and api_core exceptions."""
+    response = getattr(exc, "response", None)
+    candidates = [
+        getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        getattr(exc, "status", None),
+        getattr(response, "status_code", None),
+        getattr(response, "status", None),
+    ]
+    for candidate in candidates:
+        if callable(candidate):
+            try:
+                candidate = candidate()
+            except TypeError:
+                continue
+        if candidate is None:
+            continue
+
+        raw_value = getattr(candidate, "value", candidate)
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, str) and raw_value.isdigit():
+            return int(raw_value)
+
+        name = str(getattr(candidate, "name", candidate)).lower().replace("-", "_").replace(" ", "_")
+        if name in _STATUS_NAME_CODES:
+            return _STATUS_NAME_CODES[name]
+    return None

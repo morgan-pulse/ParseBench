@@ -4,10 +4,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from google.api_core import exceptions as google_exceptions
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderRetryExhaustedError
+from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.inference.providers.parse.google import GoogleProvider
+from parse_bench.inference.providers.parse.google_agentic_vision import (
+    USER_PROMPT_AGENTIC_VISION_PREFIX,
+    classify_gemini_api_exception,
+    parse_page_response,
+)
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
 from parse_bench.schemas.product import ProductType
@@ -250,3 +260,89 @@ def test_google_agentic_mixed_failures_can_succeed_on_final_owned_attempt(
     assert [call["attempt"] for call in calls] == [1, 2, 3]
     assert [call["usage"]["total_tokens"] for call in calls] == [8, 0, 10]
     assert calls[1]["error"]["type"] == "ProviderTransientError"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        google_exceptions.InternalServerError("internal"),
+        google_exceptions.ServiceUnavailable("unavailable"),
+        google_exceptions.GatewayTimeout("deadline"),
+        TimeoutError(),
+        ConnectionError(),
+    ],
+)
+def test_google_agentic_classifies_real_transient_errors(error: Exception) -> None:
+    assert isinstance(classify_gemini_api_exception(error), ProviderTransientError)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        google_exceptions.BadRequest("bad request"),
+        google_exceptions.Unauthorized("unauthorized"),
+        google_exceptions.Forbidden("forbidden"),
+        google_exceptions.NotFound("not found"),
+    ],
+)
+def test_google_agentic_classifies_real_permanent_errors(error: Exception) -> None:
+    assert isinstance(classify_gemini_api_exception(error), ProviderPermanentError)
+
+
+def test_google_agentic_blank_middle_page_preserves_page_identity_and_raw_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered: list[Image.Image] = []
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 3})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        assert Path(path) == source
+        assert first_page == last_page
+        image = Image.new("RGB", (8 + first_page, 8), "white")
+        rendered.append(image)
+        return [image]
+
+    monkeypatch.setattr("pdf2image.convert_from_path", render_page)
+    first = '<div data-bbox="[0,0,1000,1000]" data-label="Text">page one</div>'
+    third = '<div data-bbox="[0,0,1000,1000]" data-label="Text">page three</div>'
+    provider, models = _agentic_provider([_response(first), _response("[]"), _response(third)])
+
+    raw_result = provider.run_inference(_pipeline(), _request(source))
+    result = provider.normalize(raw_result)
+
+    assert models.calls == 3
+    assert raw_result.raw_output["num_api_calls"] == 3
+    assert [page["page_index"] for page in raw_result.raw_output["pages"]] == [0, 1, 2]
+    blank = raw_result.raw_output["pages"][1]
+    assert blank["items"] == []
+    assert blank["markdown"] == ""
+    assert blank["raw_content"] == ""
+    assert len(blank["api_calls"]) == 1
+    assert blank["api_calls"][0]["final_text"] == "[]"
+    assert [page.page_index for page in result.output.pages] == [0, 1, 2]
+    assert [page.markdown for page in result.output.pages] == ["page one", "", "page three"]
+    assert [page.page_number for page in result.output.layout_pages] == [1, 2, 3]
+    assert result.output.layout_pages[1].items == []
+    assert "exactly []" in USER_PROMPT_AGENTIC_VISION_PREFIX
+    for image in rendered:
+        with pytest.raises(ValueError, match="Operation on closed image"):
+            image.getpixel((0, 0))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _response(None),
+        _response(""),
+        _response("not wrapped"),
+        _response("[ ]"),
+        _response("[] trailing text"),
+    ],
+    ids=["missing", "empty", "malformed", "non-exact-array", "array-with-trailing-text"],
+)
+def test_google_agentic_missing_empty_and_malformed_are_not_blank(response: SimpleNamespace) -> None:
+    with pytest.raises(ValueError, match="No (valid )?wrapped layout payload"):
+        parse_page_response(response)
