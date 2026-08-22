@@ -35,6 +35,8 @@ class TesseractProvider(Provider):
     Handles scanned documents where embedded text is not available.
     """
 
+    PDF_RENDER_DPI = 300
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the provider.
@@ -51,7 +53,7 @@ class TesseractProvider(Provider):
         super().__init__(provider_name, base_config)
         self._lang = self.base_config.get("lang", "eng")
         self._config = self.base_config.get("config", "")
-        self._dpi = self.base_config.get("dpi", 300)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._output_type = self.base_config.get("output_type", "text")
 
     def _ocr_pdf(self, pdf_path: str) -> dict[str, Any]:

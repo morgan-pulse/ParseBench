@@ -138,6 +138,8 @@ class Qwen35Provider(Provider):
         - api_key_env (str, default="VLLM_API_KEY"): Env var for API key
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -149,7 +151,7 @@ class Qwen35Provider(Provider):
         self._model = self.base_config.get("model", DEFAULT_SERVED_MODEL_NAME)
         self._prompt_mode = self.base_config.get("prompt_mode", "parse")
         self._timeout = self.base_config.get("timeout", 600)
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._max_tokens = self.base_config.get("max_tokens", 16384)
         self._temperature = self.base_config.get("temperature", 0.1)
 

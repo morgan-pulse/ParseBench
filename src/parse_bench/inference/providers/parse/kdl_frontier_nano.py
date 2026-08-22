@@ -3073,6 +3073,8 @@ class KdlFrontierNanoProvider(Provider):
     """Standalone provider for KDLAI/KDL-Frontier-Parser-nano (one vLLM
     endpoint + deterministic orchestration; no other learned components)."""
 
+    PDF_RENDER_DPI = 144
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
         self._endpoint_url = (self.base_config.get("endpoint_url") or os.getenv("KDL_NANO_ENDPOINT_URL") or "").rstrip(
@@ -3084,7 +3086,7 @@ class KdlFrontierNanoProvider(Provider):
                 "URL ending in /v1, serving KDLAI/KDL-Frontier-Parser-nano)."
             )
         self._model = self.base_config.get("model") or os.getenv("KDL_NANO_MODEL") or "kdl-frontier-parser-nano"
-        self._dpi = int(self.base_config.get("dpi", os.getenv("KDL_NANO_DPI", "144")))
+        self._dpi = int(self.base_config.get("dpi", os.getenv("KDL_NANO_DPI", str(self.PDF_RENDER_DPI))))
         self._timeout = float(self.base_config.get("timeout", 900))
         self._max_pages = int(self.base_config.get("max_pages", os.getenv("KDL_NANO_MAX_PAGES", "400")))
         self._max_concurrent = int(os.getenv("KDL_NANO_MAX_CONCURRENT", "8"))

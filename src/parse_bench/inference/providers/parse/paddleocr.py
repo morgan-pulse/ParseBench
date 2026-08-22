@@ -58,6 +58,8 @@ class PaddleOCRProvider(Provider):
         - dpi (int, default=150): DPI for PDF to image conversion
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the PaddleOCR provider.
@@ -85,7 +87,7 @@ class PaddleOCRProvider(Provider):
             raise ProviderConfigError(f"Invalid task '{self._task}'. Must be one of: {list(TASK_PROMPTS.keys())}")
 
         self._timeout = self.base_config.get("timeout", 600)
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
 
         # Model name sent to the vLLM server. Defaults to the 1.5 model; override
         # via the ``served_model_name`` key for other releases (e.g. PaddleOCR-VL-1.6-0.9B).

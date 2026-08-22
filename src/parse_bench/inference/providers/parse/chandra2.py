@@ -194,6 +194,8 @@ class Chandra2Provider(Provider):
         - api_key_env (str, default="VLLM_API_KEY"): Env var for API key (openai format only)
     """
 
+    PDF_RENDER_DPI = 192
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -214,7 +216,7 @@ class Chandra2Provider(Provider):
             raise ProviderConfigError(f"Invalid task '{self._task}'. Must be one of: {list(TASK_PROMPTS.keys())}")
 
         self._timeout = self.base_config.get("timeout", 600)
-        self._dpi = self.base_config.get("dpi", 192)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
 
         # API key for authenticated vLLM endpoints
         api_key_env = self.base_config.get("api_key_env", "VLLM_API_KEY")

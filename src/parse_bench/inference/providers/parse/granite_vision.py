@@ -69,6 +69,8 @@ class GraniteVisionProvider(Provider):
         - api_key_env (str, default="VLLM_API_KEY"): Env var for API key
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -106,7 +108,7 @@ class GraniteVisionProvider(Provider):
         self._task = task_cfg
 
         self._timeout = self.base_config.get("timeout", 600)
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
         self._served_model_name: str = str(self.base_config.get("served_model_name", SERVED_MODEL_NAME))
 
         # API key for authenticated vLLM endpoints

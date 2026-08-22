@@ -52,6 +52,8 @@ class UnlimitedOCRProvider(Provider):
         - dpi (int, default=300): DPI for PDF to image conversion
     """
 
+    PDF_RENDER_DPI = 300
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -62,7 +64,7 @@ class UnlimitedOCRProvider(Provider):
 
         # Match the model's reference config: PDF_DPI=300, REQUEST_TIMEOUT=1200.
         self._timeout = self.base_config.get("timeout", 1200)
-        self._dpi = self.base_config.get("dpi", 300)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
 
     def _pdf_to_image(self, pdf_path: Path) -> bytes:
         try:

@@ -75,6 +75,8 @@ class InfinityParser2Provider(Provider):
         - deep_parsing_mode (bool, default=True): Parse figure content.
     """
 
+    PDF_RENDER_DPI = 300
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -160,7 +162,12 @@ class InfinityParser2Provider(Provider):
             raise ProviderPermanentError(f"Error parsing document: {e}") from e
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
-        multipage_result = run_pdf_pages(pipeline, request, dpi=300, run_single_image=self.run_inference)
+        multipage_result = run_pdf_pages(
+            pipeline,
+            request,
+            dpi=InfinityParser2Provider.PDF_RENDER_DPI,
+            run_single_image=self.run_inference,
+        )
         if multipage_result is not None:
             return multipage_result
 
@@ -473,7 +480,12 @@ def load_image(file_path: str) -> tuple[PILImage.Image, float, float]:
     """
     path = Path(file_path)
     if path.suffix.lower() == ".pdf":
-        images = convert_from_path(str(path), dpi=300, first_page=1, last_page=1)
+        images = convert_from_path(
+            str(path),
+            dpi=InfinityParser2Provider.PDF_RENDER_DPI,
+            first_page=1,
+            last_page=1,
+        )
         if not images:
             raise ProviderPermanentError(f"Failed to render PDF page: {file_path}")
         try:

@@ -61,6 +61,8 @@ class TextractProvider(Provider):
     Tables are converted to HTML to preserve their visual structure.
     """
 
+    PDF_RENDER_DPI = 300
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         """
         Initialize the provider.
@@ -274,7 +276,7 @@ class TextractProvider(Provider):
                     raise ProviderPermanentError(f"Invalid document: {error_message}") from exc
                 raise ProviderTransientError(f"AWS Textract error: {error_message}") from exc
 
-        with open_document_page_images(path, dpi=300) as images:
+        with open_document_page_images(path, dpi=self.PDF_RENDER_DPI) as images:
             for page_num, image in enumerate(images):
                 # Convert PIL image to bytes, resizing if needed for Textract limits
                 img_bytes = self._resize_image_for_textract(image)

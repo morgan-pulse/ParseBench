@@ -51,6 +51,8 @@ class DeepSeekOCR2Provider(Provider):
         - dpi (int, default=150): DPI for PDF to image conversion
     """
 
+    PDF_RENDER_DPI = 150
+
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
@@ -60,7 +62,7 @@ class DeepSeekOCR2Provider(Provider):
         self._server_url: str = server_url
 
         self._timeout = self.base_config.get("timeout", 600)
-        self._dpi = self.base_config.get("dpi", 150)
+        self._dpi = self.base_config.get("dpi", self.PDF_RENDER_DPI)
 
     def _pdf_to_image(self, pdf_path: Path) -> bytes:
         try:

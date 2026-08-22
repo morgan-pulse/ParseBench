@@ -346,10 +346,8 @@ def test_every_registered_parse_provider_has_explicit_pdf_classification() -> No
     }
     for spec in classified.values():
         if spec.pdf_handling == "local-page-raster":
-            assert spec.dpi is not None
             assert spec.execution in {"adapter", "direct", "kdl"}
         else:
-            assert spec.dpi is None
             assert spec.execution is None
 
     local_raster = {
@@ -361,3 +359,36 @@ def test_every_registered_parse_provider_has_explicit_pdf_classification() -> No
         spec.provider_name: (spec.module_name, spec.class_name) for spec in IMAGE_BACKED_PDF_PROVIDERS
     } == local_raster
     assert {spec.execution for spec in IMAGE_BACKED_PDF_PROVIDERS} == {"adapter", "direct", "kdl"}
+
+
+def test_local_raster_metadata_reads_declared_provider_defaults() -> None:
+    expected_defaults = {
+        "amazon_nova": 150,
+        "anthropic": 150,
+        "chandra2": 192,
+        "deepseekocr2": 150,
+        "dots_ocr_parse": 150,
+        "falconocr": 200,
+        "gemma4": 150,
+        "google": 150,
+        "granite_vision": 150,
+        "infinity_parser2": 300,
+        "kdl_frontier_nano": 144,
+        "mineru25": 150,
+        "mineru2605pro": 150,
+        "mineru_diffusion": 150,
+        "nemotron_omni": 150,
+        "openai": 150,
+        "paddleocr": 150,
+        "qwen3_5": 150,
+        "surya2": 192,
+        "tesseract": 300,
+        "textract": 300,
+        "unlimitedocr": 300,
+    }
+
+    assert {spec.provider_name: spec.dpi for spec in IMAGE_BACKED_PDF_PROVIDERS} == expected_defaults
+    for spec in IMAGE_BACKED_PDF_PROVIDERS:
+        module = importlib.import_module(f"parse_bench.inference.providers.parse.{spec.module_name}")
+        provider_class = getattr(module, spec.class_name)
+        assert provider_class.PDF_RENDER_DPI == expected_defaults[spec.provider_name]
