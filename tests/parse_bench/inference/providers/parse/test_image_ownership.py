@@ -403,8 +403,8 @@ def test_infinity_deep_parsing_preserves_classified_error_and_closes_crop(
 
 @pytest.mark.parametrize(
     "response",
-    [json.dumps({"error": "model diagnostic"}), "", "[]"],
-    ids=["diagnostic-dict", "empty", "empty-list"],
+    [json.dumps({"error": "model diagnostic"}), ""],
+    ids=["diagnostic-dict", "empty"],
 )
 def test_infinity_deep_parsing_rejects_invalid_layout_response(response: str) -> None:
     provider = _infinity_provider(Mock(), deep_parsing=True)
@@ -427,8 +427,8 @@ def test_infinity_deep_parsing_rejects_empty_or_non_text_figure_result(
 
 @pytest.mark.parametrize(
     "result",
-    [json.dumps({"error": "diagnostic"}), "not json", "[]", json.dumps(["invalid element"])],
-    ids=["diagnostic-dict", "malformed-json", "empty-list", "non-object-element"],
+    [json.dumps({"error": "diagnostic"}), "not json", json.dumps(["invalid element"])],
+    ids=["diagnostic-dict", "malformed-json", "non-object-element"],
 )
 def test_infinity_normalize_rejects_invalid_results(result: str) -> None:
     provider = _infinity_provider(Mock())

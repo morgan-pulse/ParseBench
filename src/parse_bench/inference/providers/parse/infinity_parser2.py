@@ -251,7 +251,12 @@ class InfinityParser2Provider(Provider):
         }
 
     @staticmethod
-    def _decode_layout_elements(result: Any, *, context: str) -> list[dict[str, Any]]:
+    def _decode_layout_elements(
+        result: Any,
+        *,
+        context: str,
+        allow_empty: bool = False,
+    ) -> list[dict[str, Any]]:
         if not isinstance(result, str) or not result.strip():
             raise ProviderPermanentError(f"{context} is empty or is not JSON text")
         try:
@@ -260,7 +265,7 @@ class InfinityParser2Provider(Provider):
             raise ProviderPermanentError(f"{context} is not valid JSON: {exc}") from exc
         if not isinstance(decoded, list):
             raise ProviderPermanentError(f"{context} must decode to a list of layout elements")
-        if not decoded:
+        if not decoded and not allow_empty:
             raise ProviderPermanentError(f"{context} contains no layout elements")
         if any(not isinstance(element, dict) for element in decoded):
             raise ProviderPermanentError(f"{context} contains a non-object layout element")
@@ -281,7 +286,14 @@ class InfinityParser2Provider(Provider):
         aborts inference rather than silently substituting the shallow result.
         """
         try:
-            elements = self._decode_layout_elements(result, context="InfinityParser2 deep-parsing input")
+            elements = self._decode_layout_elements(
+                result,
+                context="InfinityParser2 deep-parsing input",
+                allow_empty=True,
+            )
+
+            if not elements:
+                return result
 
             figure_elements = [elem for elem in elements if elem.get("category", "").strip().lower() == "figure"]
             if not figure_elements:
@@ -337,10 +349,14 @@ class InfinityParser2Provider(Provider):
         page_width = raw_result.raw_output["_config"]["page_width"]
         page_height = raw_result.raw_output["_config"]["page_height"]
 
-        elements = self._decode_layout_elements(result_str, context="InfinityParser2 result")
+        elements = self._decode_layout_elements(
+            result_str,
+            context="InfinityParser2 result",
+            allow_empty=True,
+        )
 
         # Group elements by page
-        pages_dict: dict[int, list[dict]] = {}
+        pages_dict: dict[int, list[dict]] = {1: []} if not elements else {}
         for element_index, elem in enumerate(elements):
             page_num = elem.get("page", 1)
             if not isinstance(page_num, int) or isinstance(page_num, bool) or page_num < 1:
