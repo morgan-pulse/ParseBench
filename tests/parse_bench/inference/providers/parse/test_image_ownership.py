@@ -399,3 +399,47 @@ def test_infinity_deep_parsing_preserves_classified_error_and_closes_crop(
     assert isinstance(crops[0].close, Mock) and crops[0].close.call_count == 1
     assert isinstance(opened_image.close, Mock) and opened_image.close.call_count == 1
     assert isinstance(converted_image.close, Mock) and converted_image.close.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [json.dumps({"error": "model diagnostic"}), "", "[]"],
+    ids=["diagnostic-dict", "empty", "empty-list"],
+)
+def test_infinity_deep_parsing_rejects_invalid_layout_response(response: str) -> None:
+    provider = _infinity_provider(Mock(), deep_parsing=True)
+    with Image.new("RGB", (8, 8), "white") as image:
+        with pytest.raises(ProviderPermanentError, match="deep-parsing input"):
+            provider._apply_deep_parsing(response, image)
+
+
+@pytest.mark.parametrize("deep_response", ["", "   ", None, {"error": "diagnostic"}])
+def test_infinity_deep_parsing_rejects_empty_or_non_text_figure_result(
+    deep_response: object,
+) -> None:
+    shallow = json.dumps([{"category": "figure", "bbox": [0, 0, 4, 4], "text": "shallow figure"}])
+    provider = _infinity_provider(Mock(return_value=deep_response), deep_parsing=True)
+
+    with Image.new("RGB", (8, 8), "white") as image:
+        with pytest.raises(ProviderPermanentError, match="deep response for figure 1"):
+            provider._apply_deep_parsing(shallow, image)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [json.dumps({"error": "diagnostic"}), "not json", "[]", json.dumps(["invalid element"])],
+    ids=["diagnostic-dict", "malformed-json", "empty-list", "non-object-element"],
+)
+def test_infinity_normalize_rejects_invalid_results(result: str) -> None:
+    provider = _infinity_provider(Mock())
+    raw_result = SimpleNamespace(
+        raw_output={
+            "result": result,
+            "_config": {"page_width": 8, "page_height": 8},
+        },
+        pipeline_name="infinity-test",
+        request=SimpleNamespace(example_id="document"),
+    )
+
+    with pytest.raises(ProviderPermanentError):
+        provider._normalize(raw_result)

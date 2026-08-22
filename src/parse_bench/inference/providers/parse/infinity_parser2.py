@@ -250,6 +250,22 @@ class InfinityParser2Provider(Provider):
             "layout_segments": [layout_seg],
         }
 
+    @staticmethod
+    def _decode_layout_elements(result: Any, *, context: str) -> list[dict[str, Any]]:
+        if not isinstance(result, str) or not result.strip():
+            raise ProviderPermanentError(f"{context} is empty or is not JSON text")
+        try:
+            decoded = json.loads(result)
+        except json.JSONDecodeError as exc:
+            raise ProviderPermanentError(f"{context} is not valid JSON: {exc}") from exc
+        if not isinstance(decoded, list):
+            raise ProviderPermanentError(f"{context} must decode to a list of layout elements")
+        if not decoded:
+            raise ProviderPermanentError(f"{context} contains no layout elements")
+        if any(not isinstance(element, dict) for element in decoded):
+            raise ProviderPermanentError(f"{context} contains a non-object layout element")
+        return decoded
+
     def _apply_deep_parsing(
         self,
         result: str,
@@ -265,9 +281,7 @@ class InfinityParser2Provider(Provider):
         aborts inference rather than silently substituting the shallow result.
         """
         try:
-            elements: list[dict] = json.loads(result)
-            if not isinstance(elements, list):
-                return result
+            elements = self._decode_layout_elements(result, context="InfinityParser2 deep-parsing input")
 
             figure_elements = [elem for elem in elements if elem.get("category", "").strip().lower() == "figure"]
             if not figure_elements:
@@ -293,8 +307,14 @@ class InfinityParser2Provider(Provider):
                     "custom_prompt": "please convert the image to a markdown table",
                     "max_new_tokens": 2048,
                 }
-                deep_results = [self._parser.parse(img, **deep_parse_kwargs) for img in pil_figure_images]
-                for elem, deep_result in zip(figure_elements, deep_results, strict=True):
+                for figure_index, (elem, figure_image) in enumerate(
+                    zip(figure_elements, pil_figure_images, strict=True), start=1
+                ):
+                    deep_result = self._parser.parse(figure_image, **deep_parse_kwargs)
+                    if not isinstance(deep_result, str) or not deep_result.strip():
+                        raise ProviderPermanentError(
+                            f"InfinityParser2 deep response for figure {figure_index} is empty or invalid"
+                        )
                     elem["text"] = deep_result
 
             return json.dumps(elements)
@@ -317,24 +337,19 @@ class InfinityParser2Provider(Provider):
         page_width = raw_result.raw_output["_config"]["page_width"]
         page_height = raw_result.raw_output["_config"]["page_height"]
 
-        # Load elements
-        try:
-            elements: list[dict] = json.loads(result_str)
-            if not isinstance(elements, list):
-                elements = []
-        except json.JSONDecodeError:
-            elements = []
+        elements = self._decode_layout_elements(result_str, context="InfinityParser2 result")
 
         # Group elements by page
         pages_dict: dict[int, list[dict]] = {}
-        for elem in elements:
+        for element_index, elem in enumerate(elements):
             page_num = elem.get("page", 1)
+            if not isinstance(page_num, int) or isinstance(page_num, bool) or page_num < 1:
+                raise ProviderPermanentError(
+                    f"InfinityParser2 layout element {element_index} has invalid page: {page_num!r}"
+                )
             if page_num not in pages_dict:
                 pages_dict[page_num] = []
             pages_dict[page_num].append(elem)
-
-        if not pages_dict:
-            pages_dict = {1: []}
 
         if len(pages_dict) != 1:
             raise ProviderPermanentError(
@@ -412,7 +427,12 @@ class InfinityParser2Provider(Provider):
                 f"InfinityParser2Provider only supports PARSE product type, got {raw_result.product_type}"
             )
 
-        output = self._normalize(raw_result)
+        try:
+            output = self._normalize(raw_result)
+        except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
+            raise
+        except Exception as exc:
+            raise ProviderPermanentError(f"Invalid InfinityParser2 normalized result: {exc}") from exc
 
         return InferenceResult(
             request=raw_result.request,
