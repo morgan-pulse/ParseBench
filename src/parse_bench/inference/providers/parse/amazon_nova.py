@@ -36,8 +36,11 @@ from parse_bench.inference.providers.parse._layout_utils import (
     extract_layout_blocks_lenient,
     items_to_markdown,
     parse_layout_blocks,
+    validated_sorted_page_records,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
+    annotate_attempt_costs,
+    append_attempt_usages,
     close_derived_images,
     open_document_page_images,
     run_page_with_retries,
@@ -327,6 +330,7 @@ class AmazonNovaProvider(Provider):
 
         stop_reason = str(response.get("stopReason", ""))
         text = self._extract_text(response)
+        usage = self._extract_usage(response)
 
         # Bedrock's built-in content filter returns HTTP 200 with a canned
         # notice in the text block ("The generated text has been blocked by our
@@ -336,11 +340,17 @@ class AmazonNovaProvider(Provider):
         # responses — and a page that stays blocked surfaces as a failed doc
         # rather than as an empty parse.
         if stop_reason == "content_filtered":
-            raise ProviderTransientError(f"Bedrock content filter blocked the response (stopReason={stop_reason})")
+            raise ProviderTransientError(
+                f"Bedrock content filter blocked the response (stopReason={stop_reason})",
+                attempt_stats=usage,
+            )
         if not text.strip():
-            raise ProviderTransientError(f"Bedrock Converse returned no text (stopReason={stop_reason or 'unknown'})")
+            raise ProviderTransientError(
+                f"Bedrock Converse returned no text (stopReason={stop_reason or 'unknown'})",
+                attempt_stats=usage,
+            )
 
-        return text, self._extract_usage(response), stop_reason
+        return text, usage, stop_reason
 
     def _parse_image_with_layout(self, image: Image.Image) -> tuple[list[dict[str, Any]], str, dict[str, int], str]:
         """Parse a page image to layout-annotated markdown blocks."""
@@ -378,16 +388,20 @@ class AmazonNovaProvider(Provider):
 
         try:
             page_usages: list[dict[str, int]] = []
+            api_attempts: list[dict[str, object]] = []
 
             pages: list[dict[str, Any]] = []
             with open_document_page_images(source_path, dpi=self._dpi) as images:
                 for page_index, image in enumerate(images):
+                    attempts: list[dict[str, object]] = []
                     items, raw_content, usage, stop_reason = run_page_with_retries(
                         partial(self._parse_image_with_layout, image),
                         provider_name=pipeline.provider_name,
                         page_number=page_index + 1,
+                        attempt_ledger=attempts,
                     )
-                    page_usages.append(usage)
+                    api_attempts.extend(attempts)
+                    append_attempt_usages(page_usages, attempts)
                     pages.append(
                         {
                             "page_index": page_index,
@@ -409,6 +423,11 @@ class AmazonNovaProvider(Provider):
             total_all = sum(u["total_tokens"] for u in page_usages)
 
             input_rate, output_rate = self._get_pricing()
+            annotate_attempt_costs(
+                api_attempts,
+                input_rate_per_million=input_rate,
+                output_rate_per_million=output_rate,
+            )
             cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
 
             config_info: dict[str, Any] = {
@@ -436,6 +455,8 @@ class AmazonNovaProvider(Provider):
                 "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                 "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                 "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                "num_api_calls": len(api_attempts),
+                "api_attempts": api_attempts,
             }
 
             return RawInferenceResult(
@@ -470,7 +491,7 @@ class AmazonNovaProvider(Provider):
         page_markdowns: list[str] = []
         layout_pages: list[ParseLayoutPageIR] = []
 
-        for page_data in raw_result.raw_output.get("pages", []):
+        for page_data in validated_sorted_page_records(raw_result.raw_output.get("pages", [])):
             page_index = page_data.get("page_index", 0)
 
             items = page_data.get("items", [])
@@ -490,7 +511,6 @@ class AmazonNovaProvider(Provider):
             pages.append(PageIR(page_index=page_index, markdown=markdown))
             page_markdowns.append(markdown)
 
-        pages.sort(key=lambda p: p.page_index)
         full_markdown = "\n\n".join(page_markdowns)
 
         output = ParseOutput(

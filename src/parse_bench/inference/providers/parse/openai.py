@@ -22,8 +22,11 @@ from parse_bench.inference.providers.parse._layout_utils import (
     parse_layout_response,
     resolve_layout_prompts,
     split_pdf_to_pages,
+    validated_sorted_page_records,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
+    annotate_attempt_costs,
+    append_attempt_usages,
     close_derived_images,
     open_document_page_images,
     run_page_with_retries,
@@ -306,7 +309,12 @@ class OpenAIProvider(Provider):
             usage = self._extract_usage(response)
 
             # Extract text from response
-            return self._extract_response_text(response, context="image"), usage
+            try:
+                text = self._extract_response_text(response, context="image")
+            except ProviderTransientError as exc:
+                exc.attempt_stats = usage
+                raise
+            return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
             raise
@@ -354,8 +362,12 @@ class OpenAIProvider(Provider):
             response = self._client.chat.completions.create(**kwargs)
 
             usage = self._extract_usage(response)
-            text = self._extract_response_text(response, context="image layout")
-            items = self._parse_layout_response(text)
+            try:
+                text = self._extract_response_text(response, context="image layout")
+                items = self._parse_layout_response(text)
+            except ProviderTransientError as exc:
+                exc.attempt_stats = usage
+                raise
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -415,7 +427,12 @@ class OpenAIProvider(Provider):
             usage = self._extract_usage(response)
 
             # Extract text from response
-            return self._extract_response_text(response, context="PDF"), usage
+            try:
+                text = self._extract_response_text(response, context="PDF")
+            except ProviderTransientError as exc:
+                exc.attempt_stats = usage
+                raise
+            return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
             raise
@@ -464,8 +481,12 @@ class OpenAIProvider(Provider):
             response = self._client.chat.completions.create(**kwargs)
 
             usage = self._extract_usage(response)
-            text = self._extract_response_text(response, context="PDF layout page")
-            items = self._parse_layout_response(text)
+            try:
+                text = self._extract_response_text(response, context="PDF layout page")
+                items = self._parse_layout_response(text)
+            except ProviderTransientError as exc:
+                exc.attempt_stats = usage
+                raise
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -530,6 +551,7 @@ class OpenAIProvider(Provider):
 
         try:
             page_usages: list[dict[str, int]] = []
+            api_attempts: list[dict[str, object]] = []
 
             if self._mode == "file":
                 if source_path.suffix.lower() == ".pdf":
@@ -567,12 +589,15 @@ class OpenAIProvider(Provider):
                     pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(pdf_pages):
+                        attempts: list[dict[str, object]] = []
                         items, raw_content, usage = run_page_with_retries(
                             partial(self._parse_pdf_page_with_layout, pdf_bytes),
                             provider_name=pipeline.provider_name,
                             page_number=page_index + 1,
+                            attempt_ledger=attempts,
                         )
-                        page_usages.append(usage)
+                        api_attempts.extend(attempts)
+                        append_attempt_usages(page_usages, attempts)
                         pages.append(
                             {
                                 "page_index": page_index,
@@ -586,12 +611,15 @@ class OpenAIProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based layout parsing
                     with Image.open(source_path) as image:
+                        attempts = []
                         items, raw_content, usage = run_page_with_retries(
                             partial(self._parse_image_with_layout, image),
                             provider_name=pipeline.provider_name,
                             page_number=1,
+                            attempt_ledger=attempts,
                         )
-                        page_usages.append(usage)
+                        api_attempts.extend(attempts)
+                        append_attempt_usages(page_usages, attempts)
                         pages = [
                             {
                                 "page_index": 0,
@@ -609,12 +637,15 @@ class OpenAIProvider(Provider):
                 with open_document_page_images(source_path, dpi=self._dpi) as images:
                     for page_index, image in enumerate(images):
                         if self._mode == "parse_with_layout":
+                            attempts = []
                             items, raw_content, usage = run_page_with_retries(
                                 partial(self._parse_image_with_layout, image),
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
+                                attempt_ledger=attempts,
                             )
-                            page_usages.append(usage)
+                            api_attempts.extend(attempts)
+                            append_attempt_usages(page_usages, attempts)
                             pages.append(
                                 {
                                     "page_index": page_index,
@@ -625,12 +656,15 @@ class OpenAIProvider(Provider):
                                 }
                             )
                         else:
+                            attempts = []
                             markdown, usage = run_page_with_retries(
                                 partial(self._parse_image, image),
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
+                                attempt_ledger=attempts,
                             )
-                            page_usages.append(usage)
+                            api_attempts.extend(attempts)
+                            append_attempt_usages(page_usages, attempts)
                             pages.append(
                                 {
                                     "page_index": page_index,
@@ -652,6 +686,11 @@ class OpenAIProvider(Provider):
 
             # Compute cost
             input_rate, output_rate = self._get_pricing()
+            annotate_attempt_costs(
+                api_attempts,
+                input_rate_per_million=input_rate,
+                output_rate_per_million=output_rate,
+            )
             cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
 
             config_info: dict[str, Any] = {
@@ -677,6 +716,8 @@ class OpenAIProvider(Provider):
                 "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                 "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                 "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                "num_api_calls": len(api_attempts) if api_attempts else len(page_usages),
+                "api_attempts": api_attempts,
             }
 
             return RawInferenceResult(
@@ -714,7 +755,7 @@ class OpenAIProvider(Provider):
         page_markdowns: list[str] = []
         layout_pages: list[ParseLayoutPageIR] = []
 
-        for page_data in raw_result.raw_output.get("pages", []):
+        for page_data in validated_sorted_page_records(raw_result.raw_output.get("pages", [])):
             page_index = page_data.get("page_index", 0)
 
             if mode in ("parse_with_layout", "parse_with_layout_file"):
@@ -738,8 +779,6 @@ class OpenAIProvider(Provider):
             pages.append(PageIR(page_index=page_index, markdown=markdown))
             page_markdowns.append(markdown)
 
-        # Sort by page index and concatenate in sorted order
-        pages.sort(key=lambda p: p.page_index)
         full_markdown = "\n\n".join(page_markdowns)
 
         output = ParseOutput(

@@ -49,7 +49,7 @@ import os
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -2948,24 +2948,33 @@ class _NanoEngine:
         image: Image.Image,
         page_no: int,
     ) -> list[dict[str, Any]]:
+        with close_derived_images(image) as track:
+            return await self._parse_page_with_owned_images(
+                client,
+                semaphore,
+                image,
+                page_no,
+                track,
+            )
+
+    async def _run_stage_with_retries[T](
+        self,
+        call: Callable[[], Awaitable[T]],
+        *,
+        page_no: int,
+        stage: str,
+    ) -> T:
+        """Retry one physical KDL stage without replaying completed siblings."""
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                with close_derived_images(image) as track:
-                    return await self._parse_page_with_owned_images(
-                        client,
-                        semaphore,
-                        image,
-                        page_no,
-                        track,
-                    )
+                return await call()
             except ProviderTransientError as exc:
                 if attempt == max_attempts - 1:
                     raise ProviderRetryExhaustedError(
-                        f"KDL page {page_no} failed after {max_attempts} attempts: {exc}"
+                        f"KDL page {page_no} failed after {max_attempts} attempts during {stage}: {exc}"
                     ) from exc
                 await asyncio.sleep(2.0 * (2**attempt))
-
         raise AssertionError("unreachable")
 
     async def _parse_page_with_owned_images(
@@ -2986,11 +2995,15 @@ class _NanoEngine:
             pass
 
         layout_image = track(prepare_native_layout_image(image))
-        layout_content = await _nano_chat(
-            client,
-            self._url,
-            _nano_payload("layout", self._model, layout_image),
-            semaphore,
+        layout_content = await self._run_stage_with_retries(
+            lambda: _nano_chat(
+                client,
+                self._url,
+                _nano_payload("layout", self._model, layout_image),
+                semaphore,
+            ),
+            page_no=page_no,
+            stage="layout",
         )
         if not is_native_layout_response(layout_content):
             raise ProviderPermanentError(f"Page {page_no} returned a non-native layout response")
@@ -3015,7 +3028,11 @@ class _NanoEngine:
             if stage == "picture" and (pre.width < 25 or pre.height < 25):
                 el["content"] = ""
                 return
-            content = await _nano_chat(client, self._url, _nano_payload(stage, self._model, pre), semaphore)
+            content = await self._run_stage_with_retries(
+                lambda: _nano_chat(client, self._url, _nano_payload(stage, self._model, pre), semaphore),
+                page_no=page_no,
+                stage=f"{stage} recognition",
+            )
             if stage == "picture":
                 _nano_apply_picture_result(el, content)
             else:
@@ -3023,11 +3040,15 @@ class _NanoEngine:
 
         async def recognize_table_fullpage(el: dict[str, Any]) -> None:
             assert fullpage_table is not None
-            content = await _nano_chat(
-                client,
-                self._url,
-                _nano_payload("table", self._model, fullpage_table),
-                semaphore,
+            content = await self._run_stage_with_retries(
+                lambda: _nano_chat(
+                    client,
+                    self._url,
+                    _nano_payload("table", self._model, fullpage_table),
+                    semaphore,
+                ),
+                page_no=page_no,
+                stage="full-page table recognition",
             )
             if content is not None and _nano_is_single_clean_otsl(content):
                 el["content"] = content

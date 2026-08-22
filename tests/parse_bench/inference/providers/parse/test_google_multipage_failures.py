@@ -71,6 +71,20 @@ class _Models:
         return response
 
 
+class _Caches:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            name="cachedContents/document-prefix",
+            usage_metadata=SimpleNamespace(total_token_count=2048),
+        )
+
+    def delete(self, *, name: str) -> None:
+        self.deleted.append(name)
+
+
 def _provider(mode: str, responses: list[object]) -> tuple[GoogleProvider, _Models]:
     provider = object.__new__(GoogleProvider)
     models = _Models(responses)
@@ -148,6 +162,47 @@ def test_google_page_two_empty_responses_abort_without_partial_payload(
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
             image.getpixel((0, 0))
+
+
+def test_google_retry_ledger_accounts_billed_malformed_response_usage_and_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "page.png"
+    with Image.new("RGB", (8, 8), "white") as image:
+        image.save(source)
+    malformed = _response(None)
+    malformed.usage_metadata = SimpleNamespace(
+        prompt_token_count=10,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=4,
+        thoughts_token_count=1,
+        total_token_count=15,
+    )
+    success = _response("parsed")
+    success.usage_metadata = SimpleNamespace(
+        prompt_token_count=11,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=5,
+        thoughts_token_count=1,
+        total_token_count=17,
+    )
+    provider, models = _provider("image", [malformed, success])
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert models.calls == 2
+    assert result.raw_output["num_api_calls"] == 2
+    assert result.raw_output["input_tokens"] == 21
+    assert result.raw_output["output_tokens"] == 9
+    assert result.raw_output["thinking_tokens"] == 2
+    assert result.raw_output["total_tokens"] == 32
+    assert len(result.raw_output["api_attempts"]) == 2
+    assert result.raw_output["api_attempts"][0]["status"] == "failed"
+    assert result.raw_output["cost_usd"] > 0
 
 
 def test_google_agentic_page_two_malformed_then_transient_exhausts_one_page_budget(
@@ -330,6 +385,43 @@ def test_google_agentic_blank_middle_page_preserves_page_identity_and_raw_calls(
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
             image.getpixel((0, 0))
+
+
+@pytest.mark.parametrize("terminal_failure", [False, True], ids=["success", "failure"])
+def test_google_agentic_document_finally_deletes_server_cache(
+    terminal_failure: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), "white")],
+    )
+    monkeypatch.setattr(
+        "parse_bench.inference.providers.parse.google_agentic_vision.time.sleep",
+        lambda delay: None,
+    )
+    valid = '<div data-bbox="[0,0,1000,1000]" data-label="Text">page</div>'
+    responses = [_response(valid), _response(valid)]
+    if terminal_failure:
+        responses = [_response(valid), _response("bad"), _response("bad"), _response("bad")]
+    provider, _ = _agentic_provider(responses)
+    caches = _Caches()
+    provider._client.caches = caches
+    provider._types.CreateCachedContentConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    provider._enable_explicit_context_cache = True
+
+    if terminal_failure:
+        with pytest.raises(ProviderRetryExhaustedError):
+            provider.run_inference(_pipeline(), _request(source))
+    else:
+        result = provider.run_inference(_pipeline(), _request(source))
+        assert result.raw_output["explicit_context_cache"]["deleted"] is True
+
+    assert caches.deleted == ["cachedContents/document-prefix"]
 
 
 @pytest.mark.parametrize(

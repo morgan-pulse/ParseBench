@@ -46,20 +46,106 @@ def run_page_with_retries[PageResultT](
     *,
     provider_name: str,
     page_number: int,
+    attempt_ledger: list[dict[str, object]] | None = None,
 ) -> PageResultT:
-    """Run one billable page with the sole retry budget for that page."""
+    """Run one billable page and record every physical provider attempt."""
 
     for attempt in range(_PAGE_MAX_ATTEMPTS):
         try:
-            return call()
+            result = call()
         except (ProviderTransientError, ProviderRateLimitError) as exc:
+            if attempt_ledger is not None:
+                attempt_ledger.append(
+                    {
+                        "page_number": page_number,
+                        "attempt": attempt + 1,
+                        "status": "failed",
+                        "stats": dict(exc.attempt_stats or {}),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
             if attempt == _PAGE_MAX_ATTEMPTS - 1:
                 raise ProviderRetryExhaustedError(
-                    f"{provider_name} page {page_number} failed after {_PAGE_MAX_ATTEMPTS} attempts: {exc}"
+                    f"{provider_name} page {page_number} failed after {_PAGE_MAX_ATTEMPTS} attempts: {exc}",
+                    debug_payload={"attempts": list(attempt_ledger or [])},
                 ) from exc
             time.sleep(_PAGE_INITIAL_BACKOFF_S * (2**attempt))
+        else:
+            if attempt_ledger is not None:
+                attempt_ledger.append(
+                    {
+                        "page_number": page_number,
+                        "attempt": attempt + 1,
+                        "status": "succeeded",
+                        "stats": _result_attempt_stats(result),
+                    }
+                )
+            return result
 
     raise AssertionError("unreachable")
+
+
+def _result_attempt_stats(result: object) -> dict[str, int | float]:
+    """Extract public operational fields from a successful physical attempt."""
+    source: object = result.raw_output if isinstance(result, RawInferenceResult) else None
+    if source is None and isinstance(result, tuple):
+        source = next((item for item in reversed(result) if isinstance(item, dict)), None)
+    if not isinstance(source, dict):
+        return {}
+    return {
+        field: value
+        for field, value in source.items()
+        if field in {*_ADDITIVE_STAT_FIELDS, *_PER_PAGE_STAT_FIELDS}
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    }
+
+
+def append_attempt_usages(
+    usages: list[dict[str, int]],
+    attempts: list[dict[str, object]],
+) -> None:
+    """Append token buckets from every recorded attempt to document usage."""
+    for attempt in attempts:
+        stats = attempt.get("stats")
+        if isinstance(stats, dict):
+            usage = {
+                key: int(value)
+                for key, value in stats.items()
+                if key.endswith("tokens")
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            }
+            for key in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
+                usage.setdefault(key, 0)
+            usages.append(usage)
+
+
+def annotate_attempt_costs(
+    attempts: list[dict[str, object]],
+    *,
+    input_rate_per_million: float,
+    output_rate_per_million: float,
+) -> None:
+    """Add the same token-derived cost used by document summaries to each attempt."""
+    for attempt in attempts:
+        stats = attempt.get("stats")
+        if not isinstance(stats, dict):
+            continue
+        input_tokens = stats.get("input_tokens", 0)
+        output_tokens = stats.get("output_tokens", 0)
+        thinking_tokens = stats.get("thinking_tokens", 0)
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (input_tokens, output_tokens, thinking_tokens)
+        ):
+            continue
+        stats["cost_usd"] = (
+            input_tokens * input_rate_per_million + (output_tokens + thinking_tokens) * output_rate_per_million
+        ) / 1_000_000
 
 
 @dataclass(frozen=True)
@@ -217,6 +303,13 @@ _PER_PAGE_STAT_FIELDS = (
     "cached_content_tokens_per_page",
     "output_tokens_per_page",
 )
+_PER_PAGE_ADDITIVE_FIELDS = {
+    "cost_per_page_usd": "cost_usd",
+    "input_tokens_per_page": "input_tokens",
+    "tool_use_prompt_tokens_per_page": "tool_use_prompt_tokens",
+    "cached_content_tokens_per_page": "cached_content_tokens",
+    "output_tokens_per_page": "output_tokens",
+}
 
 
 @contextmanager
@@ -351,16 +444,19 @@ def run_pdf_pages(
                 page_path = Path(temp_dir) / f"page-{page_index + 1:06d}.png"
                 _save_png(image, page_path)
                 page_request = request.model_copy(update={"source_file_path": str(page_path)})
+                attempts: list[dict[str, object]] = []
                 page_result = run_page_with_retries(
                     partial(run_single_image, pipeline, page_request),
                     provider_name=pipeline.provider_name,
                     page_number=page_index + 1,
+                    attempt_ledger=attempts,
                 )
                 page_results.append(
                     {
                         "page_index": page_index,
                         "raw_output": page_result.raw_output,
                         "latency_in_ms": page_result.latency_in_ms,
+                        "attempts": attempts,
                     }
                 )
 
@@ -395,17 +491,29 @@ def _aggregate_page_raw_outputs(page_results: list[dict[str, object]]) -> dict[s
     """
 
     aggregate: dict[str, int | float] = {"num_pages": len(page_results)}
-    raw_outputs = [record.get("raw_output") for record in page_results]
+    attempts: list[dict[str, object]] = []
+    for record in page_results:
+        record_attempts = record.get("attempts")
+        if isinstance(record_attempts, list):
+            attempts.extend(attempt for attempt in record_attempts if isinstance(attempt, dict))
+    attempt_stats = [attempt.get("stats") for attempt in attempts]
 
     for field in _ADDITIVE_STAT_FIELDS:
-        values = _complete_numeric_values(raw_outputs, field)
+        if field == "num_api_calls":
+            aggregate[field] = len(attempts)
+            continue
+        values = _complete_numeric_values(attempt_stats, field)
         if values is not None:
             aggregate[field] = sum(values)
 
     for field in _PER_PAGE_STAT_FIELDS:
-        values = _complete_numeric_values(raw_outputs, field)
+        additive_field = _PER_PAGE_ADDITIVE_FIELDS[field]
+        if additive_field in aggregate:
+            aggregate[field] = aggregate[additive_field] / len(page_results)
+            continue
+        values = _complete_numeric_values(attempt_stats, field)
         if values is not None:
-            aggregate[field] = sum(values) / len(values)
+            aggregate[field] = sum(values) / len(page_results)
 
     return aggregate
 

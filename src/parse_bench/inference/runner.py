@@ -237,28 +237,24 @@ class InferenceRunner:
         self,
         example_id: str,
         future: concurrent.futures.Future[Any],
-        *,
-        drain_timeout_seconds: float = 5.0,
     ) -> None:
-        """Best-effort timeout cancel for synchronous retry loops."""
+        """Cancel cooperatively and wait until no prior worker can overlap a retry."""
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
-            future.result(timeout=drain_timeout_seconds)
-        except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError, Exception):
+            future.result()
+        except (concurrent.futures.CancelledError, Exception):
             pass
 
     async def _cancel_inflight_and_drain_async(
         self,
         example_id: str,
         future: concurrent.futures.Future[Any],
-        *,
-        drain_timeout_seconds: float = 5.0,
     ) -> None:
-        """Best-effort timeout cancel for async retry loops without blocking the event loop."""
+        """Cancel cooperatively and await termination before any async retry."""
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
-            await asyncio.wait_for(asyncio.wrap_future(future), timeout=drain_timeout_seconds)
-        except (TimeoutError, concurrent.futures.CancelledError, asyncio.CancelledError, Exception):
+            await asyncio.shield(asyncio.wrap_future(future))
+        except (concurrent.futures.CancelledError, asyncio.CancelledError, Exception):
             pass
 
     def _is_already_processed(self, example_id: str) -> bool:

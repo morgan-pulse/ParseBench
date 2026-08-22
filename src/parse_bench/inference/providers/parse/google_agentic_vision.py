@@ -601,6 +601,7 @@ class GoogleAgenticVisionRunner:
         self._expected_page_calls = expected_page_calls
         self._cache_info: AgenticVisionCacheInfo | None = None
         self._cache_error: str | None = None
+        self._cache_deleted = False
 
     @property
     def cache_info(self) -> AgenticVisionCacheInfo | None:
@@ -609,6 +610,23 @@ class GoogleAgenticVisionRunner:
     @property
     def cache_error(self) -> str | None:
         return self._cache_error
+
+    @property
+    def cache_deleted(self) -> bool:
+        return self._cache_deleted
+
+    def delete_prefix_cache(self) -> None:
+        """Delete the document-scoped server cache once, including failure paths."""
+        if self._cache_deleted or self._cache_info is None or not self._cache_info.name:
+            return
+        try:
+            self._client.caches.delete(name=self._cache_info.name)
+        except Exception as exc:  # cleanup must not replace the document outcome
+            logger.warning("Failed to delete Gemini context cache for Agentic Vision: %s", exc)
+            message = f"cache deletion failed: {exc}"
+            self._cache_error = f"{self._cache_error}; {message}" if self._cache_error else message
+        else:
+            self._cache_deleted = True
 
     def _maybe_create_prefix_cache(self) -> AgenticVisionCacheInfo | None:
         if self._cache_info is not None:

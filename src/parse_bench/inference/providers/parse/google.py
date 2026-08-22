@@ -23,8 +23,10 @@ from parse_bench.inference.providers.parse._layout_utils import (
     resolve_layout_prompts,
     split_pdf_to_pages,
     swap_gemini_bbox,
+    validated_sorted_page_records,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
+    append_attempt_usages,
     close_derived_images,
     open_document_page_images,
     run_page_with_retries,
@@ -240,6 +242,10 @@ class GoogleProvider(Provider):
             "cost_usd": cost_usd,
         }
 
+    def _billable_response_error(self, message: str, usage: dict[str, int]) -> ProviderTransientError:
+        """Retain usage and cost when a billed Gemini response is unusable."""
+        return ProviderTransientError(message, attempt_stats={**usage, **self._usage_cost_breakdown(usage)})
+
     def _compute_usage_cost_summary(
         self,
         usages: list[dict[str, int]],
@@ -307,6 +313,13 @@ class GoogleProvider(Provider):
                 "cached_input_cost_usd": breakdown["cached_input_cost_usd"],
                 "output_and_thinking_cost_usd": breakdown["output_and_thinking_cost_usd"],
             }
+
+    def _annotate_retry_attempts_with_costs(self, attempts: list[dict[str, object]]) -> None:
+        for attempt in attempts:
+            stats = attempt.get("stats")
+            if isinstance(stats, dict):
+                usage = {key: int(value) for key, value in stats.items() if key.endswith("tokens")}
+                stats.update(self._usage_cost_breakdown(usage))
 
     def _build_agentic_vision_runner(self, expected_page_calls: int) -> GoogleAgenticVisionRunner:
         """Build the shared Agentic Vision runner for one document."""
@@ -508,7 +521,9 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                raise ProviderTransientError(f"Gemini API returned no text: {self._failure_reason(response)}")
+                raise self._billable_response_error(
+                    f"Gemini API returned no text: {self._failure_reason(response)}", usage
+                )
             return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -560,12 +575,14 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                raise ProviderTransientError(f"Gemini API returned no layout text: {self._failure_reason(response)}")
+                raise self._billable_response_error(
+                    f"Gemini API returned no layout text: {self._failure_reason(response)}", usage
+                )
 
             try:
                 items = swap_gemini_bbox(parse_layout_response(text))
             except ValueError as exc:
-                raise ProviderTransientError(f"Gemini returned malformed layout output: {exc}") from exc
+                raise self._billable_response_error(f"Gemini returned malformed layout output: {exc}", usage) from exc
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -626,7 +643,9 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                raise ProviderTransientError(f"Gemini API returned no PDF text: {self._failure_reason(response)}")
+                raise self._billable_response_error(
+                    f"Gemini API returned no PDF text: {self._failure_reason(response)}", usage
+                )
             return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -677,14 +696,16 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                raise ProviderTransientError(
-                    f"Gemini API returned no PDF layout text: {self._failure_reason(response)}"
+                raise self._billable_response_error(
+                    f"Gemini API returned no PDF layout text: {self._failure_reason(response)}", usage
                 )
 
             try:
                 items = swap_gemini_bbox(parse_layout_response(text))
             except ValueError as exc:
-                raise ProviderTransientError(f"Gemini returned malformed PDF layout output: {exc}") from exc
+                raise self._billable_response_error(
+                    f"Gemini returned malformed PDF layout output: {exc}", usage
+                ) from exc
             return items, text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -718,9 +739,12 @@ class GoogleProvider(Provider):
             raise ProviderPermanentError(f"GoogleProvider supports {supported_extensions}, got {source_path.suffix}")
 
         started_at = datetime.now()
+        runner: GoogleAgenticVisionRunner | None = None
+        result: RawInferenceResult | None = None
 
         try:
             page_usages: list[dict[str, int]] = []
+            api_attempts: list[dict[str, object]] = []
 
             if self._mode == "file":
                 if source_path.suffix.lower() == ".pdf":
@@ -758,12 +782,15 @@ class GoogleProvider(Provider):
                     layout_pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(layout_pdf_pages):
+                        attempts: list[dict[str, object]] = []
                         items, raw_content, usage = run_page_with_retries(
                             partial(self._parse_pdf_page_with_layout, pdf_bytes),
                             provider_name=pipeline.provider_name,
                             page_number=page_index + 1,
+                            attempt_ledger=attempts,
                         )
-                        page_usages.append(usage)
+                        api_attempts.extend(attempts)
+                        append_attempt_usages(page_usages, attempts)
                         pages.append(
                             {
                                 "page_index": page_index,
@@ -777,12 +804,15 @@ class GoogleProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based layout parsing
                     with Image.open(source_path) as image:
+                        attempts = []
                         items, raw_content, usage = run_page_with_retries(
                             partial(self._parse_image_with_layout, image),
                             provider_name=pipeline.provider_name,
                             page_number=1,
+                            attempt_ledger=attempts,
                         )
-                        page_usages.append(usage)
+                        api_attempts.extend(attempts)
+                        append_attempt_usages(page_usages, attempts)
                         pages = [
                             {
                                 "page_index": 0,
@@ -846,12 +876,15 @@ class GoogleProvider(Provider):
                 with open_document_page_images(source_path, dpi=self._dpi) as images:
                     for page_index, image in enumerate(images):
                         if self._mode == "parse_with_layout":
+                            attempts = []
                             items, raw_content, usage = run_page_with_retries(
                                 partial(self._parse_image_with_layout, image),
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
+                                attempt_ledger=attempts,
                             )
-                            page_usages.append(usage)
+                            api_attempts.extend(attempts)
+                            append_attempt_usages(page_usages, attempts)
                             pages.append(
                                 {
                                     "page_index": page_index,
@@ -862,12 +895,15 @@ class GoogleProvider(Provider):
                                 }
                             )
                         else:
+                            attempts = []
                             markdown, usage = run_page_with_retries(
                                 partial(self._parse_image, image),
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
+                                attempt_ledger=attempts,
                             )
-                            page_usages.append(usage)
+                            api_attempts.extend(attempts)
+                            append_attempt_usages(page_usages, attempts)
                             pages.append(
                                 {
                                     "page_index": page_index,
@@ -894,7 +930,13 @@ class GoogleProvider(Provider):
                 config_info["min_cacheable_tokens"] = self._min_cacheable_tokens
 
             if self._mode == "parse_with_layout_agentic_vision":
-                cache_info = runner.cache_info if "runner" in locals() else None
+                assert runner is not None
+                api_attempts = []
+                for page in pages:
+                    page_calls = page.get("api_calls")
+                    if isinstance(page_calls, list):
+                        api_attempts.extend(call for call in page_calls if isinstance(call, dict))
+                cache_info = runner.cache_info
                 cache_storage_cost_usd = cache_info.storage_cost_usd if cache_info is not None else 0.0
                 usage_summary = self._compute_usage_cost_summary(
                     page_usages,
@@ -902,6 +944,7 @@ class GoogleProvider(Provider):
                     cache_storage_cost_usd=cache_storage_cost_usd,
                 )
             else:
+                self._annotate_retry_attempts_with_costs(api_attempts)
                 total_input = sum(u["input_tokens"] for u in page_usages)
                 total_output = sum(u["output_tokens"] for u in page_usages)
                 total_thinking = sum(u["thinking_tokens"] for u in page_usages)
@@ -918,6 +961,7 @@ class GoogleProvider(Provider):
                     "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                     "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                     "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                    "num_api_calls": len(api_attempts) if api_attempts else len(page_usages),
                 }
 
             raw_output = {
@@ -928,10 +972,12 @@ class GoogleProvider(Provider):
                 "bbox_scale": self._bbox_scale,
                 "config": config_info,
                 **usage_summary,
+                "api_attempts": api_attempts,
             }
             if self._mode == "parse_with_layout_agentic_vision":
-                cache_info = runner.cache_info if "runner" in locals() else None
-                raw_output["cache_error"] = runner.cache_error if "runner" in locals() else None
+                assert runner is not None
+                cache_info = runner.cache_info
+                raw_output["cache_error"] = runner.cache_error
                 raw_output["explicit_context_cache"] = (
                     {
                         "name": cache_info.name,
@@ -945,7 +991,7 @@ class GoogleProvider(Provider):
                     else None
                 )
 
-            return RawInferenceResult(
+            result = RawInferenceResult(
                 request=request,
                 pipeline=pipeline,
                 pipeline_name=pipeline.pipeline_name,
@@ -955,11 +1001,20 @@ class GoogleProvider(Provider):
                 completed_at=completed_at,
                 latency_in_ms=latency_ms,
             )
+            return result
 
         except (ProviderPermanentError, ProviderTransientError, ProviderConfigError):
             raise
         except Exception as e:
             raise ProviderPermanentError(f"Unexpected error during inference: {e}") from e
+        finally:
+            if runner is not None:
+                runner.delete_prefix_cache()
+                if result is not None:
+                    result.raw_output["cache_error"] = runner.cache_error
+                    cache_payload = result.raw_output.get("explicit_context_cache")
+                    if isinstance(cache_payload, dict):
+                        cache_payload["deleted"] = runner.cache_deleted
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
         """
@@ -980,7 +1035,7 @@ class GoogleProvider(Provider):
         page_markdowns: list[str] = []
         layout_pages: list[ParseLayoutPageIR] = []
 
-        for page_data in raw_result.raw_output.get("pages", []):
+        for page_data in validated_sorted_page_records(raw_result.raw_output.get("pages", [])):
             page_index = page_data.get("page_index", 0)
 
             if mode in ("parse_with_layout", "parse_with_layout_file"):
@@ -1015,8 +1070,6 @@ class GoogleProvider(Provider):
             pages.append(PageIR(page_index=page_index, markdown=markdown))
             page_markdowns.append(markdown)
 
-        # Sort by page index and concatenate
-        pages.sort(key=lambda p: p.page_index)
         full_markdown = "\n\n".join(page_markdowns)
 
         output = ParseOutput(

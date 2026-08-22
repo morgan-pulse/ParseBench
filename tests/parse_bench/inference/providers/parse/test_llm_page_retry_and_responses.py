@@ -95,6 +95,8 @@ def test_layout_file_page_two_retry_never_replays_page_one(
     raw_result = provider.run_inference(_pipeline(module_name), _request(source))
 
     assert raw_result.raw_output["num_pages"] == 2
+    assert raw_result.raw_output["num_api_calls"] == 3
+    assert len(raw_result.raw_output["api_attempts"]) == 3
     assert calls == [1, 2, 2]
 
 

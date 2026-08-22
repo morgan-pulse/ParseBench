@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +42,55 @@ def _request(source: Path) -> InferenceRequest:
         source_file_path=str(source),
         product_type=ProductType.PARSE,
     )
+
+
+def test_timeout_drain_blocks_resubmission_until_running_worker_terminates() -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = object()
+    started = threading.Event()
+    release = threading.Event()
+    drain_returned = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        release.wait()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker)
+        assert started.wait(timeout=1)
+        drain_thread = threading.Thread(
+            target=lambda: (runner._cancel_inflight_and_drain("document", future), drain_returned.set())
+        )
+        drain_thread.start()
+        assert not drain_returned.wait(timeout=0.05)
+        release.set()
+        drain_thread.join(timeout=1)
+        assert drain_returned.is_set()
+
+
+def test_async_timeout_drain_awaits_running_worker_termination() -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = object()
+    started = threading.Event()
+    release = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        release.wait()
+
+    async def exercise(future: concurrent.futures.Future[None]) -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.wrap_future(future), timeout=0.01)
+        drain = asyncio.create_task(runner._cancel_inflight_and_drain_async("document", future))
+        await asyncio.sleep(0.05)
+        assert not drain.done()
+        release.set()
+        await asyncio.wait_for(drain, timeout=1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker)
+        assert started.wait(timeout=1)
+        asyncio.run(exercise(future))
 
 
 def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, monkeypatch) -> None:
@@ -210,10 +262,67 @@ def test_transient_page_retry_does_not_replay_prior_page_or_duplicate_output(
 
     assert raw_result is not None
     assert requested_pages == [1, 2, 2, 3]
-    assert raw_result.raw_output["num_api_calls"] == 3
+    assert raw_result.raw_output["num_api_calls"] == 4
     envelope = raw_result.raw_output["_parse_bench_multipage"]
     assert isinstance(envelope, dict)
     assert [page["page_index"] for page in envelope["pages"]] == [0, 1, 2]
+
+
+def test_multipage_retry_ledger_aggregates_failed_attempt_usage_and_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 1})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), "white")],
+    )
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+    calls = 0
+
+    def run_single_image(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProviderTransientError(
+                "malformed billed response",
+                attempt_stats={
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "total_tokens": 7,
+                    "cost_usd": 0.05,
+                },
+            )
+        now = datetime.now()
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output={
+                "markdown": "success",
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "cost_usd": 0.1,
+                "num_api_calls": 1,
+            },
+            started_at=now,
+            completed_at=now,
+            latency_in_ms=1,
+        )
+
+    result = run_pdf_pages(_pipeline(), _request(source), dpi=144, run_single_image=run_single_image)
+
+    assert result is not None
+    assert result.raw_output["num_api_calls"] == 2
+    assert result.raw_output["input_tokens"] == 15
+    assert result.raw_output["output_tokens"] == 6
+    assert result.raw_output["total_tokens"] == 21
+    assert result.raw_output["cost_usd"] == pytest.approx(0.15)
+    assert result.raw_output["cost_per_page_usd"] == pytest.approx(0.15)
 
 
 def test_exhausted_page_retry_is_terminal_to_document_runner(
@@ -315,7 +424,7 @@ def test_multipage_aggregation_omits_partial_or_invalid_provider_metadata(tmp_pa
     assert result.raw_output["output_tokens"] == 3
     assert "input_tokens" not in result.raw_output
     assert "cost_usd" not in result.raw_output
-    assert "num_api_calls" not in result.raw_output
+    assert result.raw_output["num_api_calls"] == 2
 
 
 def test_pdf_render_failure_identifies_page_and_stops(tmp_path: Path, monkeypatch) -> None:

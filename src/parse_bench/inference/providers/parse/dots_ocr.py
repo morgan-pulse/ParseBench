@@ -26,6 +26,7 @@ from parse_bench.inference.providers.base import (
     ProviderRateLimitError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._layout_utils import validated_sorted_page_records
 from parse_bench.inference.providers.parse._multipage_image import (
     open_document_page_images,
     run_page_with_retries,
@@ -308,22 +309,31 @@ class DotsOcrParseProvider(Provider):
     # Per-page inference
     # ------------------------------------------------------------------
 
-    def _call_page_with_retries(self, image: Image.Image, page_number: int) -> str:
+    def _call_page_with_retries(
+        self,
+        image: Image.Image,
+        page_number: int,
+        attempt_ledger: list[dict[str, object]],
+    ) -> str:
         """Own transient retries at the billable page request boundary."""
         return run_page_with_retries(
             lambda: self._call_endpoint(image),
             provider_name="dots.ocr",
             page_number=page_number,
+            attempt_ledger=attempt_ledger,
         )
 
     def _run_inference_pages(self, source_path: Path) -> dict[str, Any]:
         """Convert source file to images and run inference on each page."""
         pages = []
+        api_attempts: list[dict[str, object]] = []
         with open_document_page_images(source_path, dpi=self._dpi) as images:
             for page_index, image in enumerate(images):
                 page_image = image if image.mode in ("RGB", "RGBA") else image.convert("RGB")
                 try:
-                    raw_text = self._call_page_with_retries(page_image, page_index + 1)
+                    attempts: list[dict[str, object]] = []
+                    raw_text = self._call_page_with_retries(page_image, page_index + 1, attempts)
+                    api_attempts.extend(attempts)
 
                     page_data: dict[str, Any] = {
                         "page_index": page_index,
@@ -354,6 +364,8 @@ class DotsOcrParseProvider(Provider):
             "num_pages": num_pages,
             "model": self._model,
             "prompt_mode": self._prompt_mode,
+            "num_api_calls": len(api_attempts),
+            "api_attempts": api_attempts,
             "config": {
                 "dpi": self._dpi,
                 "max_tokens": self._max_tokens,
@@ -416,7 +428,7 @@ class DotsOcrParseProvider(Provider):
         layout_pages: list[ParseLayoutPageIR] = []
         page_markdowns: list[str] = []
 
-        for page_data in raw_result.raw_output.get("pages", []):
+        for page_data in validated_sorted_page_records(raw_result.raw_output.get("pages", [])):
             page_index = page_data.get("page_index", 0)
             markdown = page_data.get("markdown", "")
             img_width = page_data.get("width", 0)
@@ -430,7 +442,8 @@ class DotsOcrParseProvider(Provider):
 
             # Build layout_pages from structured layout items (if available)
             layout_items = page_data.get("layout_items", [])
-            if layout_items and img_width > 0 and img_height > 0:
+            is_layout_mode = raw_result.raw_output.get("prompt_mode") in _LAYOUT_PROMPT_MODES
+            if is_layout_mode and img_width > 0 and img_height > 0:
                 layout_page = _build_layout_page(
                     layout_items=layout_items,
                     page_number=page_index + 1,
@@ -440,7 +453,6 @@ class DotsOcrParseProvider(Provider):
                 )
                 layout_pages.append(layout_page)
 
-        pages.sort(key=lambda p: p.page_index)
         full_markdown = "\n\n".join(page_markdowns)
 
         output = ParseOutput(
