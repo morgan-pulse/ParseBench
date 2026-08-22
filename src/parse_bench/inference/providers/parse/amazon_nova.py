@@ -363,7 +363,15 @@ class AmazonNovaProvider(Provider):
         # Prefer the lenient reader (Nova uses <TABLE>/<p> wrappers and leaves
         # them unclosed); fall back to the strict shared parser if it finds
         # nothing, so this can never score worse than the default path.
-        items = extract_layout_blocks_lenient(text) or parse_layout_blocks(text)
+        if text.strip() == "[]":
+            items: list[dict[str, Any]] = []
+        else:
+            items = extract_layout_blocks_lenient(text) or parse_layout_blocks(text)
+            if not items:
+                raise ProviderTransientError(
+                    "Bedrock Converse returned malformed non-empty layout output",
+                    attempt_stats=usage,
+                )
         return close_open_ended_bands(items), text, usage, stop_reason
 
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
@@ -423,23 +431,22 @@ class AmazonNovaProvider(Provider):
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-            total_input = sum(u["input_tokens"] for u in page_usages)
-            total_output = sum(u["output_tokens"] for u in page_usages)
-            total_thinking = sum(u["thinking_tokens"] for u in page_usages)
-            total_all = sum(u["total_tokens"] for u in page_usages)
-
-            usage_summary = (
-                {
-                    "input_tokens": total_input,
-                    "output_tokens": total_output,
-                    "thinking_tokens": total_thinking,
-                    "total_tokens": total_all,
-                    "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
-                    "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
-                }
-                if attempt_usages_complete(page_usages)
-                else {}
-            )
+            usage_summary: dict[str, int | float] = {}
+            if attempt_usages_complete(page_usages):
+                total_input = sum(u["input_tokens"] for u in page_usages)
+                total_output = sum(u["output_tokens"] for u in page_usages)
+                total_thinking = sum(u["thinking_tokens"] for u in page_usages)
+                total_all = sum(u["total_tokens"] for u in page_usages)
+                usage_summary.update(
+                    {
+                        "input_tokens": total_input,
+                        "output_tokens": total_output,
+                        "thinking_tokens": total_thinking,
+                        "total_tokens": total_all,
+                        "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
+                        "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                    }
+                )
             pricing = self._get_pricing()
             if pricing is not None and attempt_usages_complete(page_usages):
                 input_rate, output_rate = pricing

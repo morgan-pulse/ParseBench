@@ -10,9 +10,11 @@ import pytest
 from PIL import Image
 
 from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
     ProviderRetryExhaustedError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._multipage_image import annotate_attempt_costs, run_page_once
 from parse_bench.inference.providers.parse.google_agentic_vision import extract_usage_from_response
 from parse_bench.inference.runner import InferenceRunner
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -200,6 +202,98 @@ def test_missing_success_usage_remains_unknown(module_name: str, class_name: str
     )
 
     assert provider_class._extract_usage(response) == {}
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    [
+        ("google", "GoogleProvider"),
+        ("openai", "OpenAIProvider"),
+        ("anthropic", "AnthropicProvider"),
+    ],
+)
+def test_native_file_success_without_usage_keeps_output_and_physical_ledger(
+    module_name: str,
+    class_name: str,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    provider = _layout_file_provider(module_name, class_name)
+    provider._mode = "file"
+    provider._get_pricing = lambda: None
+    provider._parse_pdf_file = lambda path: ("parsed", {})
+
+    result = provider.run_inference(_pipeline(module_name), _request(source))
+
+    assert result.raw_output["pages"][0]["markdown"] == "parsed"
+    assert result.raw_output["num_api_calls"] == 1
+    assert result.raw_output["api_attempts"] == [{"page_number": 1, "attempt": 1, "status": "succeeded", "stats": {}}]
+    assert "input_tokens" not in result.raw_output
+    assert "cost_usd" not in result.raw_output
+
+
+def test_permanent_physical_call_persists_attempt_before_reraising() -> None:
+    attempts: list[dict[str, object]] = []
+
+    def fail() -> None:
+        raise ProviderPermanentError("submitted bad request", attempt_stats={"input_tokens": 3})
+
+    with pytest.raises(ProviderPermanentError) as caught:
+        run_page_once(fail, page_number=2, attempt_ledger=attempts)
+
+    assert attempts == [
+        {
+            "page_number": 2,
+            "attempt": 1,
+            "status": "failed",
+            "stats": {"input_tokens": 3},
+            "error_type": "ProviderPermanentError",
+            "error": "submitted bad request",
+        }
+    ]
+    assert caught.value.debug_payload == {"attempts": attempts}
+
+
+def test_openai_reasoning_is_not_double_billed_and_cached_input_is_not_full_price() -> None:
+    module = importlib.import_module("parse_bench.inference.providers.parse.openai")
+    provider = object.__new__(module.OpenAIProvider)
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=40,
+            total_tokens=140,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=60),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=10),
+        )
+    )
+
+    usage = provider._extract_usage(response)
+
+    assert usage == {
+        "input_tokens": 100,
+        "cached_content_tokens": 60,
+        "output_tokens": 40,
+        "thinking_tokens": 10,
+        "total_tokens": 140,
+    }
+    attempts: list[dict[str, object]] = [{"stats": dict(usage)}]
+    annotate_attempt_costs(
+        attempts,
+        input_rate_per_million=1.0,
+        output_rate_per_million=2.0,
+        output_tokens_include_thinking=True,
+    )
+    assert "cost_usd" not in attempts[0]["stats"]
+
+    uncached_attempts: list[dict[str, object]] = [{"stats": {**usage, "cached_content_tokens": 0}}]
+    annotate_attempt_costs(
+        uncached_attempts,
+        input_rate_per_million=1.0,
+        output_rate_per_million=2.0,
+        output_tokens_include_thinking=True,
+    )
+    assert uncached_attempts[0]["stats"]["cost_usd"] == pytest.approx(0.00018)
 
 
 def test_agentic_missing_or_partial_success_usage_remains_incomplete() -> None:

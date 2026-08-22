@@ -53,19 +53,14 @@ def run_page_with_retries[PageResultT](
 
     for attempt in range(_PAGE_MAX_ATTEMPTS):
         try:
-            result = call()
+            result = run_page_once(
+                call,
+                page_number=page_number,
+                attempt=attempt + 1,
+                attempt_ledger=attempt_ledger,
+                prior_attempt_ledger=prior_attempt_ledger,
+            )
         except (ProviderTransientError, ProviderRateLimitError) as exc:
-            if attempt_ledger is not None:
-                attempt_ledger.append(
-                    {
-                        "page_number": page_number,
-                        "attempt": attempt + 1,
-                        "status": "failed",
-                        "stats": dict(exc.attempt_stats or {}),
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    }
-                )
             if attempt == _PAGE_MAX_ATTEMPTS - 1:
                 debug_attempts = list(attempt_ledger or [])
                 if prior_attempt_ledger is not None and prior_attempt_ledger is not attempt_ledger:
@@ -76,18 +71,54 @@ def run_page_with_retries[PageResultT](
                 ) from exc
             time.sleep(_PAGE_INITIAL_BACKOFF_S * (2**attempt))
         else:
-            if attempt_ledger is not None:
-                attempt_ledger.append(
-                    {
-                        "page_number": page_number,
-                        "attempt": attempt + 1,
-                        "status": "succeeded",
-                        "stats": _result_attempt_stats(result),
-                    }
-                )
             return result
 
     raise AssertionError("unreachable")
+
+
+def run_page_once[PageResultT](
+    call: Callable[[], PageResultT],
+    *,
+    page_number: int,
+    attempt: int = 1,
+    attempt_ledger: list[dict[str, object]] | None = None,
+    prior_attempt_ledger: list[dict[str, object]] | None = None,
+) -> PageResultT:
+    """Run one physical provider call, preserving its original error semantics."""
+    try:
+        result = call()
+    except (ProviderPermanentError, ProviderTransientError, ProviderRateLimitError) as exc:
+        if attempt_ledger is not None:
+            attempt_ledger.append(
+                {
+                    "page_number": page_number,
+                    "attempt": attempt,
+                    "status": "failed",
+                    "stats": dict(exc.attempt_stats or {}),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+        payload = dict(exc.debug_payload or {})
+        current_attempts = payload.get("attempts")
+        recorded_attempts = list(attempt_ledger or [])
+        if prior_attempt_ledger is not None and prior_attempt_ledger is not attempt_ledger:
+            recorded_attempts = [*prior_attempt_ledger, *recorded_attempts]
+        if isinstance(current_attempts, list) and current_attempts != recorded_attempts:
+            recorded_attempts.extend(current_attempts)
+        payload["attempts"] = recorded_attempts
+        exc.debug_payload = payload
+        raise
+    if attempt_ledger is not None:
+        attempt_ledger.append(
+            {
+                "page_number": page_number,
+                "attempt": attempt,
+                "status": "succeeded",
+                "stats": _result_attempt_stats(result),
+            }
+        )
+    return result
 
 
 def _result_attempt_stats(result: object) -> dict[str, int | float]:
@@ -125,8 +156,6 @@ def append_attempt_usages(
             }
             required = {"input_tokens", "output_tokens", "total_tokens"}
             usage_known = required.issubset(usage)
-            for key in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
-                usage.setdefault(key, 0)
             if not usage_known:
                 usage["_usage_known"] = 0
             usages.append(usage)
@@ -157,6 +186,8 @@ def annotate_attempt_costs(
     *,
     input_rate_per_million: float,
     output_rate_per_million: float,
+    output_tokens_include_thinking: bool = False,
+    cached_input_rate_per_million: float | None = None,
 ) -> None:
     """Add the same token-derived cost used by document summaries to each attempt."""
     for attempt in attempts:
@@ -168,13 +199,22 @@ def annotate_attempt_costs(
         input_tokens = stats["input_tokens"]
         output_tokens = stats["output_tokens"]
         thinking_tokens = stats.get("thinking_tokens", 0)
+        cached_content_tokens = stats.get("cached_content_tokens", 0)
         if not all(
             isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in (input_tokens, output_tokens, thinking_tokens)
+            for value in (input_tokens, output_tokens, thinking_tokens, cached_content_tokens)
         ):
             continue
+        if cached_content_tokens and cached_input_rate_per_million is None:
+            continue
+        cached_tokens = min(input_tokens, cached_content_tokens)
+        output_and_thinking_tokens = (
+            output_tokens if output_tokens_include_thinking else output_tokens + thinking_tokens
+        )
         stats["cost_usd"] = (
-            input_tokens * input_rate_per_million + (output_tokens + thinking_tokens) * output_rate_per_million
+            (input_tokens - cached_tokens) * input_rate_per_million
+            + cached_tokens * (cached_input_rate_per_million or 0.0)
+            + output_and_thinking_tokens * output_rate_per_million
         ) / 1_000_000
 
 

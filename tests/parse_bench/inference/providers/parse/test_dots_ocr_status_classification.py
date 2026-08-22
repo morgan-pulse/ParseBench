@@ -10,6 +10,7 @@ from PIL import Image
 from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderRateLimitError,
+    ProviderRetryExhaustedError,
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse.dots_ocr import DotsOcrParseProvider
@@ -68,3 +69,51 @@ def test_dots_other_real_4xx_statuses_are_permanent(status_code: int) -> None:
 
     with pytest.raises(ProviderPermanentError):
         provider._call_endpoint(Image.new("RGB", (1, 1)))
+
+
+def test_dots_layout_failure_retries_with_usage_in_terminal_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = object.__new__(DotsOcrParseProvider)
+    provider._is_layout_mode = True
+    monkeypatch.setattr(
+        provider,
+        "_call_endpoint",
+        lambda image: (
+            "not layout json",
+            {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        ),
+    )
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+    attempts: list[dict[str, object]] = []
+
+    with Image.new("RGB", (8, 8), "white") as image:
+        with pytest.raises(ProviderRetryExhaustedError) as caught:
+            provider._call_page_with_retries(image, 1, attempts, [])
+
+    assert len(attempts) == 3
+    assert [attempt["status"] for attempt in attempts] == ["failed", "failed", "failed"]
+    assert [attempt["stats"]["total_tokens"] for attempt in attempts] == [10, 10, 10]
+    assert caught.value.debug_payload["attempts"] == attempts
+
+
+def test_dots_successful_page_attempt_records_response_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = object.__new__(DotsOcrParseProvider)
+    provider._is_layout_mode = True
+    monkeypatch.setattr(
+        provider,
+        "_call_endpoint",
+        lambda image: (
+            "[]",
+            {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8},
+        ),
+    )
+    attempts: list[dict[str, object]] = []
+
+    with Image.new("RGB", (8, 8), "white") as image:
+        raw_text, usage, items = provider._call_page_with_retries(image, 1, attempts, [])
+
+    assert raw_text == "[]"
+    assert usage["total_tokens"] == 8
+    assert items == []
+    assert attempts[0]["stats"]["total_tokens"] == 8

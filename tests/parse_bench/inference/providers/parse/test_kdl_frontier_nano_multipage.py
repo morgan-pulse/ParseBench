@@ -331,6 +331,34 @@ def test_kdl_persists_every_stage_attempt_and_known_usage(
     page.close()
 
 
+def test_kdl_retries_semantically_invalid_layout_inside_stage_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _content_image()
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+
+    async def invalid_layout(*args: object, **kwargs: object) -> kdl._NanoStageResponse:
+        return kdl._NanoStageResponse(
+            content="not native layout",
+            usage={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+        )
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl, "_nano_chat", invalid_layout)
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
+
+    with pytest.raises(ProviderRetryExhaustedError) as caught:
+        asyncio.run(engine._parse_page(SimpleNamespace(), asyncio.Semaphore(1), page, 1))
+
+    attempts = caught.value.debug_payload["attempts"]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "failed", "failed"]
+    assert [attempt["stats"]["total_tokens"] for attempt in attempts] == [7, 7, 7]
+    page.close()
+
+
 @pytest.mark.parametrize("fail_recognition", [False, True], ids=["monochromatic-skip", "gather-failure"])
 def test_kdl_real_page_stage_closes_every_derivative(
     fail_recognition: bool,

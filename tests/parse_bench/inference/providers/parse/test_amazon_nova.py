@@ -229,6 +229,42 @@ def test_empty_response_is_rejected_rather_than_parsed_as_a_blank_page() -> None
         provider._converse(Image.new("RGB", (64, 64), "white"), "system", "user")
 
 
+@pytest.mark.parametrize("malformed", ["not layout markup", "[ ]", "[] trailing text"])
+def test_nonempty_malformed_layout_is_not_accepted_as_blank(malformed: str) -> None:
+    provider = _provider()
+    provider._converse = lambda *args: (
+        malformed,
+        {"input_tokens": 3, "output_tokens": 2, "thinking_tokens": 0, "total_tokens": 5},
+        "end_turn",
+    )
+
+    with pytest.raises(ProviderTransientError, match="malformed non-empty layout") as caught:
+        provider._parse_image_with_layout(Image.new("RGB", (64, 64), "white"))
+
+    assert caught.value.attempt_stats == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "thinking_tokens": 0,
+        "total_tokens": 5,
+    }
+
+
+def test_exact_empty_array_is_the_only_blank_layout_representation() -> None:
+    provider = _provider()
+    provider._converse = lambda *args: (
+        "  []\n",
+        {"input_tokens": 3, "output_tokens": 1, "thinking_tokens": 0, "total_tokens": 4},
+        "end_turn",
+    )
+
+    items, raw_text, usage, stop_reason = provider._parse_image_with_layout(Image.new("RGB", (64, 64), "white"))
+
+    assert items == []
+    assert raw_text == "  []\n"
+    assert usage["total_tokens"] == 4
+    assert stop_reason == "end_turn"
+
+
 def test_pdf_run_inference_renders_and_calls_bedrock_one_page_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

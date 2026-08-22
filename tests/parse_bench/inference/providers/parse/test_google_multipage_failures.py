@@ -440,3 +440,49 @@ def test_google_agentic_document_finally_deletes_server_cache(
 def test_google_agentic_missing_empty_and_malformed_are_not_blank(response: SimpleNamespace) -> None:
     with pytest.raises(ValueError, match="No (valid )?wrapped layout payload"):
         parse_page_response(response)
+
+
+def test_google_agentic_permanent_api_failure_persists_physical_call() -> None:
+    provider, models = _agentic_provider([google_exceptions.BadRequest("bad request")])
+    runner = provider._build_agentic_vision_runner(expected_page_calls=1)
+    image = Image.new("RGB", (8, 8), "white")
+
+    with pytest.raises(ProviderPermanentError) as caught:
+        runner.parse_page(
+            page_index=0,
+            image=image,
+            image_bytes=b"image",
+            image_mime_type="image/jpeg",
+        )
+
+    payload = caught.value.debug_payload
+    assert isinstance(payload, dict)
+    assert models.calls == 1
+    assert len(payload["api_calls"]) == 1
+    assert payload["api_calls"][0]["error"]["type"] == "ProviderPermanentError"
+    image.close()
+
+
+def test_google_agentic_permanent_page_two_failure_keeps_page_one_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), "white")],
+    )
+    valid = '<div data-bbox="[0,0,1000,1000]" data-label="Text">page one</div>'
+    provider, models = _agentic_provider([_response(valid), google_exceptions.BadRequest("bad request")])
+
+    with pytest.raises(ProviderPermanentError) as caught:
+        provider.run_inference(_pipeline(), _request(source))
+
+    payload = caught.value.debug_payload
+    assert isinstance(payload, dict)
+    assert models.calls == 2
+    assert len(payload["api_calls"]) == 2
+    assert payload["api_calls"][0]["final_text"] == valid
+    assert payload["api_calls"][1]["error"]["type"] == "ProviderPermanentError"

@@ -780,9 +780,6 @@ class GoogleAgenticVisionRunner:
                 )
             except Exception as exc:
                 classified = classify_gemini_api_exception(exc)
-                if not isinstance(classified, ProviderTransientError):
-                    raise classified from exc
-
                 last_error = str(classified)
                 api_calls.append(
                     {
@@ -799,6 +796,18 @@ class GoogleAgenticVisionRunner:
                         },
                     }
                 )
+                if not isinstance(classified, ProviderTransientError):
+                    if isinstance(classified, ProviderPermanentError):
+                        classified.debug_payload = {
+                            "mode": "parse_with_layout_agentic_vision",
+                            "page_index": page_index,
+                            "page_width": width,
+                            "page_height": height,
+                            "image_mime_type": image_mime_type,
+                            "api_calls": api_calls,
+                            "last_error": last_error,
+                        }
+                    raise classified from exc
                 if attempt < max_attempts:
                     time.sleep(2.0 * (2 ** (attempt - 1)))
                 continue

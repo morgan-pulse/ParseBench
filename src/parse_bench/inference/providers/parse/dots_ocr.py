@@ -28,6 +28,8 @@ from parse_bench.inference.providers.base import (
 )
 from parse_bench.inference.providers.parse._layout_utils import validated_sorted_page_records
 from parse_bench.inference.providers.parse._multipage_image import (
+    append_attempt_usages,
+    attempt_usages_complete,
     open_document_page_images,
     run_page_with_retries,
 )
@@ -203,8 +205,8 @@ class DotsOcrParseProvider(Provider):
     # API call
     # ------------------------------------------------------------------
 
-    def _call_endpoint(self, image: Image.Image) -> str:
-        """Call dots.ocr via OpenAI-compatible API and return raw response text."""
+    def _call_endpoint(self, image: Image.Image) -> tuple[str, dict[str, int]]:
+        """Call dots.ocr and return response text with any reported usage."""
         img_base64 = self._image_to_base64(image)
         try:
             response = self._client.chat.completions.create(
@@ -228,10 +230,32 @@ class DotsOcrParseProvider(Provider):
         except Exception as e:
             self._raise_api_error(e)
 
+        usage = self._extract_usage(response)
         content = response.choices[0].message.content
         if not content:
-            raise ProviderPermanentError("Empty response from model")
-        return cast(str, content)
+            raise ProviderTransientError("Empty response from model", attempt_stats=usage or None)
+        return cast(str, content), usage
+
+    @staticmethod
+    def _extract_usage(response: Any) -> dict[str, int]:
+        """Extract only token fields actually reported by the compatible API."""
+        raw_usage = getattr(response, "usage", None)
+        if raw_usage is None:
+            return {}
+        usage: dict[str, int] = {}
+        for key, attribute in (
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = getattr(raw_usage, attribute, None)
+            if value is not None:
+                usage[key] = int(value)
+        details = getattr(raw_usage, "completion_tokens_details", None)
+        thinking_tokens = getattr(details, "reasoning_tokens", None) if details is not None else None
+        if thinking_tokens is not None:
+            usage["thinking_tokens"] = int(thinking_tokens)
+        return usage
 
     @staticmethod
     def _raise_api_error(exc: Exception) -> NoReturn:
@@ -315,10 +339,25 @@ class DotsOcrParseProvider(Provider):
         page_number: int,
         attempt_ledger: list[dict[str, object]],
         prior_attempt_ledger: list[dict[str, object]],
-    ) -> str:
+    ) -> tuple[str, dict[str, int], list[DotsOcrLayoutItem] | None]:
         """Own transient retries at the billable page request boundary."""
+
+        def call_and_validate() -> tuple[str, dict[str, int], list[DotsOcrLayoutItem] | None]:
+            response = self._call_endpoint(image)
+            if isinstance(response, tuple):
+                raw_text, usage = response
+            else:  # compatibility for custom test doubles and provider adapters
+                raw_text, usage = response, {}
+            if not self._is_layout_mode:
+                return raw_text, usage, None
+            try:
+                layout_items = self._parse_layout_items(raw_text)
+            except ProviderPermanentError as exc:
+                raise ProviderTransientError(str(exc), attempt_stats=usage or None) from exc
+            return raw_text, usage, layout_items
+
         return run_page_with_retries(
-            lambda: self._call_endpoint(image),
+            call_and_validate,
             provider_name="dots.ocr",
             page_number=page_number,
             attempt_ledger=attempt_ledger,
@@ -334,7 +373,7 @@ class DotsOcrParseProvider(Provider):
                 page_image = image if image.mode in ("RGB", "RGBA") else image.convert("RGB")
                 try:
                     attempts: list[dict[str, object]] = []
-                    raw_text = self._call_page_with_retries(
+                    raw_text, _, layout_items = self._call_page_with_retries(
                         page_image,
                         page_index + 1,
                         attempts,
@@ -350,9 +389,7 @@ class DotsOcrParseProvider(Provider):
                     }
 
                     if self._is_layout_mode:
-                        # Parse structured JSON → typed layout items + reassemble markdown
-                        layout_items = self._parse_layout_items(raw_text)
-
+                        assert layout_items is not None
                         page_data["layout_items"] = [item.model_dump() for item in layout_items]
                         page_data["markdown"] = _reassemble_markdown(layout_items)
                     else:
@@ -366,7 +403,7 @@ class DotsOcrParseProvider(Provider):
 
             num_pages = len(images)
 
-        return {
+        raw_output: dict[str, Any] = {
             "pages": pages,
             "num_pages": num_pages,
             "model": self._model,
@@ -379,6 +416,14 @@ class DotsOcrParseProvider(Provider):
                 "timeout": self._timeout,
             },
         }
+        attempt_usages: list[dict[str, int]] = []
+        append_attempt_usages(attempt_usages, api_attempts)
+        if attempt_usages_complete(attempt_usages):
+            for field in ("input_tokens", "output_tokens", "total_tokens"):
+                raw_output[field] = sum(int(usage[field]) for usage in attempt_usages)
+            if all("thinking_tokens" in usage for usage in attempt_usages):
+                raw_output["thinking_tokens"] = sum(int(usage["thinking_tokens"]) for usage in attempt_usages)
+        return raw_output
 
     # ------------------------------------------------------------------
     # run_inference

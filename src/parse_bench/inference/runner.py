@@ -286,6 +286,26 @@ class InferenceRunner:
             return None
 
     @staticmethod
+    def _drained_outcome_is_retryable(outcome: Any) -> bool:
+        """Whether a cooperatively cancelled worker returned a retryable failure."""
+        if not isinstance(outcome, tuple) or len(outcome) != 3:
+            return False
+        error_info = outcome[2]
+        return (
+            isinstance(error_info, tuple)
+            and len(error_info) == 3
+            and error_info[2] in {"ProviderTransientError", "ProviderRateLimitError"}
+        )
+
+    @staticmethod
+    async def _cancel_child_tasks_and_wait(tasks: list[asyncio.Task[None]]) -> None:
+        """Cancel every batch child and wait for its provider worker to drain."""
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
     def _is_finite_number(value: object) -> TypeGuard[int | float]:
         return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -1088,7 +1108,10 @@ class InferenceRunner:
                     break  # Success (or handled provider error) - exit retry loop
                 except concurrent.futures.TimeoutError:
                     drained_outcome = self._cancel_inflight_and_drain(test_case.test_id, future)
-                    if drained_outcome is not None:
+                    if drained_outcome is not None and (
+                        not self._drained_outcome_is_retryable(drained_outcome)
+                        or timeout_attempt == self.timeout_retries
+                    ):
                         raw_result, normalized_result, error_info = drained_outcome
                         break
                     remaining = self.timeout_retries - timeout_attempt
@@ -1231,7 +1254,10 @@ class InferenceRunner:
                     break  # Success (or handled provider error) - exit retry loop
                 except TimeoutError:
                     drained_outcome = await self._cancel_inflight_and_drain_async(test_case.test_id, future)
-                    if drained_outcome is not None:
+                    if drained_outcome is not None and (
+                        not self._drained_outcome_is_retryable(drained_outcome)
+                        or timeout_attempt == self.timeout_retries
+                    ):
                         raw_result, normalized_result, error_info = drained_outcome
                         break
                     remaining = self.timeout_retries - timeout_attempt
@@ -1337,7 +1363,10 @@ class InferenceRunner:
                     break  # Success (or handled provider error) - exit retry loop
                 except TimeoutError:
                     drained_outcome = await self._cancel_inflight_and_drain_async(example_id, future)
-                    if drained_outcome is not None:
+                    if drained_outcome is not None and (
+                        not self._drained_outcome_is_retryable(drained_outcome)
+                        or timeout_attempt == self.timeout_retries
+                    ):
                         raw_result, normalized_result, error_info = drained_outcome
                         break
                     remaining = self.timeout_retries - timeout_attempt
@@ -1581,14 +1610,16 @@ class InferenceRunner:
 
         # Create tasks
         tasks = [
-            self._process_with_semaphore(
-                semaphore,
-                pdf_path,
-                example_id_fn(pdf_path),
-                product_type,
-                summary,
-                progress,
-                task_id,
+            asyncio.create_task(
+                self._process_with_semaphore(
+                    semaphore,
+                    pdf_path,
+                    example_id_fn(pdf_path),
+                    product_type,
+                    summary,
+                    progress,
+                    task_id,
+                )
             )
             for pdf_path in pdf_files
         ]
@@ -1687,6 +1718,9 @@ class InferenceRunner:
                                     status_table,
                                 )
                             )
+                except asyncio.CancelledError:
+                    await self._cancel_child_tasks_and_wait(tasks)
+                    raise
                 finally:
                     # Cancel background UI update task
                     ui_update_task.cancel()
@@ -1709,17 +1743,21 @@ class InferenceRunner:
                 )
         else:
             # Fallback to simple processing
-            for coro in asyncio.as_completed(tasks):
-                try:
-                    await coro
-                except Exception as e:
-                    summary.failed += 1
-                    summary.errors.append(
-                        {
-                            "error": f"Task execution error: {str(e)}",
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
+            try:
+                for coro in asyncio.as_completed(tasks):
+                    try:
+                        await coro
+                    except Exception as e:
+                        summary.failed += 1
+                        summary.errors.append(
+                            {
+                                "error": f"Task execution error: {str(e)}",
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+            except asyncio.CancelledError:
+                await self._cancel_child_tasks_and_wait(tasks)
+                raise
 
         # Finalize summary
         summary.completed_at = datetime.now()
@@ -1841,13 +1879,15 @@ class InferenceRunner:
 
         # Create tasks
         tasks = [
-            self._process_test_case_with_semaphore(
-                semaphore,
-                test_case,
-                product_type,
-                summary,
-                progress,
-                task_id,
+            asyncio.create_task(
+                self._process_test_case_with_semaphore(
+                    semaphore,
+                    test_case,
+                    product_type,
+                    summary,
+                    progress,
+                    task_id,
+                )
             )
             for test_case in test_cases
         ]
@@ -1944,6 +1984,9 @@ class InferenceRunner:
                                     status_table,
                                 )
                             )
+                except asyncio.CancelledError:
+                    await self._cancel_child_tasks_and_wait(tasks)
+                    raise
                 finally:
                     # Cancel background UI update task
                     ui_update_task.cancel()
@@ -1974,37 +2017,41 @@ class InferenceRunner:
             # Print every 10% or every 10 items, whichever is more frequent
             progress_interval = max(10, total // 10)
 
-            for coro in asyncio.as_completed(tasks):
-                try:
-                    await coro
-                    completed_count += 1
+            try:
+                for coro in asyncio.as_completed(tasks):
+                    try:
+                        await coro
+                        completed_count += 1
 
-                    # Print progress periodically
-                    if completed_count - last_progress_print >= progress_interval or completed_count == total:
-                        percentage = (completed_count / total) * 100
-                        print(
-                            f"Progress: {completed_count}/{total} ({percentage:.1f}%) - "
-                            f"Successful: {summary.successful}, Failed: {summary.failed}"
+                        # Print progress periodically
+                        if completed_count - last_progress_print >= progress_interval or completed_count == total:
+                            percentage = (completed_count / total) * 100
+                            print(
+                                f"Progress: {completed_count}/{total} ({percentage:.1f}%) - "
+                                f"Successful: {summary.successful}, Failed: {summary.failed}"
+                            )
+                            last_progress_print = completed_count
+                    except Exception as e:
+                        summary.failed += 1
+                        completed_count += 1
+                        summary.errors.append(
+                            {
+                                "error": f"Task execution error: {str(e)}",
+                                "timestamp": datetime.now().isoformat(),
+                            }
                         )
-                        last_progress_print = completed_count
-                except Exception as e:
-                    summary.failed += 1
-                    completed_count += 1
-                    summary.errors.append(
-                        {
-                            "error": f"Task execution error: {str(e)}",
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
 
-                    # Print progress on error too
-                    if completed_count - last_progress_print >= progress_interval or completed_count == total:
-                        percentage = (completed_count / total) * 100
-                        print(
-                            f"Progress: {completed_count}/{total} ({percentage:.1f}%) - "
-                            f"Successful: {summary.successful}, Failed: {summary.failed}"
-                        )
-                        last_progress_print = completed_count
+                        # Print progress on error too
+                        if completed_count - last_progress_print >= progress_interval or completed_count == total:
+                            percentage = (completed_count / total) * 100
+                            print(
+                                f"Progress: {completed_count}/{total} ({percentage:.1f}%) - "
+                                f"Successful: {summary.successful}, Failed: {summary.failed}"
+                            )
+                            last_progress_print = completed_count
+            except asyncio.CancelledError:
+                await self._cancel_child_tasks_and_wait(tasks)
+                raise
 
             # Print final summary
             print(f"\nCompleted processing {total} test cases:")

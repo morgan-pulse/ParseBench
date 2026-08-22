@@ -172,6 +172,10 @@ class TextractProvider(Provider):
                     break
                 scale *= 0.9
 
+            if len(img_bytes) > self._MAX_BYTES:
+                raise ProviderPermanentError(
+                    f"Textract image remains above the {self._MAX_BYTES}-byte API limit after resizing"
+                )
             return img_bytes
         finally:
             if candidate is not None:

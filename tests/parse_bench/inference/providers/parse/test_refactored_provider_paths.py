@@ -91,6 +91,28 @@ def test_textract_client_disables_hidden_sdk_retries(monkeypatch: pytest.MonkeyP
     assert config.retries["mode"] == "standard"  # type: ignore[attr-defined]
 
 
+def test_textract_resize_rejects_payload_still_above_hard_limit() -> None:
+    provider = object.__new__(TextractProvider)
+    provider._TARGET_BYTES = 10
+    provider._MAX_BYTES = 12
+    provider._MAX_DIMENSION = 10_000
+
+    class OversizeImage:
+        size = (100, 100)
+
+        def resize(self, size: tuple[int, int], resampling: object) -> OversizeImage:
+            return OversizeImage()
+
+        def save(self, buffer: object, **kwargs: object) -> None:
+            buffer.write(b"x" * 13)  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(ProviderPermanentError, match="above the 12-byte API limit"):
+        provider._resize_image_for_textract(OversizeImage())
+
+
 def _provider(module_name: str, class_name: str, dpi: int) -> Any:
     module = importlib.import_module(f"parse_bench.inference.providers.parse.{module_name}")
     provider = object.__new__(getattr(module, class_name))

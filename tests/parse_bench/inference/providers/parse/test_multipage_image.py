@@ -59,9 +59,6 @@ def test_partial_attempt_usage_is_not_treated_as_exact_zero_buckets() -> None:
     assert usages == [
         {
             "input_tokens": 4,
-            "output_tokens": 0,
-            "thinking_tokens": 0,
-            "total_tokens": 0,
             "_usage_known": 0,
         }
     ]
@@ -290,6 +287,93 @@ def test_external_cancellation_signals_and_drains_running_worker(tmp_path: Path)
 
     assert cancel_calls == ["document"]
     assert release.is_set()
+
+
+def test_top_level_batch_cancellation_signals_and_drains_every_running_worker(tmp_path: Path) -> None:
+    both_started = threading.Event()
+    release = threading.Event()
+    cancel_calls: list[str] = []
+    started = 0
+    started_lock = threading.Lock()
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace(cancel=lambda example_id: (cancel_calls.append(example_id), release.set()))
+    runner.pipeline = _pipeline()
+    runner.output_dir = tmp_path
+    runner.use_rich = False
+    runner.console = None
+    runner.job_statuses = {}
+    runner.timeout_retries = 0
+    runner.per_file_timeout = 60
+    runner.max_concurrent = 2
+    runner._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    runner._is_already_processed = lambda example_id: False
+
+    def process(pdf_path: Path, example_id: str, product_type: ProductType) -> tuple[None, None, None]:
+        nonlocal started
+        with started_lock:
+            started += 1
+            if started == 2:
+                both_started.set()
+        release.wait()
+        return None, None, None
+
+    runner._process_document = process
+
+    async def exercise() -> None:
+        task = asyncio.create_task(runner.run_files([tmp_path / "a.pdf", tmp_path / "b.pdf"], ProductType.PARSE))
+        while not both_started.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        runner._thread_pool.shutdown(wait=True)
+
+    assert sorted(cancel_calls) == ["a", "b"]
+
+
+def test_timeout_retries_after_cancelled_worker_returns_transient_failure(tmp_path: Path) -> None:
+    release = threading.Event()
+    calls = 0
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace(cancel=lambda example_id: release.set())
+    runner.use_rich = False
+    runner.job_statuses = {}
+    runner.timeout_retries = 1
+    runner.per_file_timeout = 0.01
+    runner._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    runner._is_already_processed = lambda example_id: False
+
+    def process(pdf_path: Path, example_id: str, product_type: ProductType) -> tuple[None, None, tuple[str, str, str]]:
+        nonlocal calls
+        calls += 1
+        release.wait()
+        return None, None, ("cancelled provider request", "", "ProviderTransientError")
+
+    runner._process_document = process
+
+    async def exercise() -> RunSummary:
+        summary = RunSummary()
+        await runner._process_with_semaphore(
+            asyncio.Semaphore(1),
+            tmp_path / "document.pdf",
+            "document",
+            ProductType.PARSE,
+            summary,
+        )
+        return summary
+
+    try:
+        summary = asyncio.run(exercise())
+    finally:
+        runner._thread_pool.shutdown(wait=True)
+
+    assert calls == 2
+    assert summary.failed == 1
 
 
 @pytest.mark.parametrize("provider_name", ["google", "openai", "anthropic"])

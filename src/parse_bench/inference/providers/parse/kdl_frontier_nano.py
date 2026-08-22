@@ -3119,21 +3119,34 @@ class _NanoEngine:
             pass
 
         layout_image = track(prepare_native_layout_image(image))
-        layout_content = await self._run_stage_with_retries(
-            lambda: _nano_chat(
+
+        async def parse_layout_stage() -> str | _NanoStageResponse:
+            response = await _nano_chat(
                 client,
                 self._url,
                 _nano_payload("layout", self._model, layout_image),
                 semaphore,
-            ),
+            )
+            content = response.content if isinstance(response, _NanoStageResponse) else response
+            usage = response.usage if isinstance(response, _NanoStageResponse) else {}
+            if not is_native_layout_response(content):
+                raise ProviderTransientError(
+                    f"Page {page_no} returned a non-native layout response",
+                    attempt_stats=usage,
+                )
+            if not parse_native_layout_tokens(content):
+                raise ProviderTransientError(
+                    f"Page {page_no} returned malformed native layout tokens",
+                    attempt_stats=usage,
+                )
+            return response
+
+        layout_content = await self._run_stage_with_retries(
+            parse_layout_stage,
             page_no=page_no,
             stage="layout",
         )
-        if not is_native_layout_response(layout_content):
-            raise ProviderPermanentError(f"Page {page_no} returned a non-native layout response")
         items = parse_native_layout_tokens(layout_content)
-        if not items:
-            raise ProviderPermanentError(f"Page {page_no} returned malformed native layout tokens")
         for item in items:
             item["page_number"] = page_no
         buckets = _nano_group_by_bucket(items, image, track)

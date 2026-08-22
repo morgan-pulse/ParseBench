@@ -32,6 +32,7 @@ from parse_bench.inference.providers.parse._multipage_image import (
     attempt_usages_complete,
     close_derived_images,
     open_document_page_images,
+    run_page_once,
     run_page_with_retries,
 )
 from parse_bench.inference.providers.registry import register_provider
@@ -662,12 +663,19 @@ class AnthropicProvider(Provider):
         try:
             page_usages: list[dict[str, int]] = []
             api_attempts: list[dict[str, object]] = []
+            attempts: list[dict[str, object]]
 
             if self._mode == "file":
                 if source_path.suffix.lower() == ".pdf":
                     # File mode: send raw PDF to API
-                    markdown, usage = self._parse_pdf_file(str(source_path))
-                    page_usages.append(usage)
+                    attempts = []
+                    markdown, usage = run_page_once(
+                        partial(self._parse_pdf_file, str(source_path)),
+                        page_number=1,
+                        attempt_ledger=attempts,
+                    )
+                    api_attempts.extend(attempts)
+                    append_attempt_usages(page_usages, attempts)
                     # In file mode, we get one response for the entire document
                     # We don't have page-level info, so we treat it as a single "page"
                     pages = [
@@ -682,8 +690,14 @@ class AnthropicProvider(Provider):
                 else:
                     # Non-PDF: fall back to image-based parsing
                     with Image.open(source_path) as image:
-                        markdown, usage = self._parse_image(image)
-                        page_usages.append(usage)
+                        attempts = []
+                        markdown, usage = run_page_once(
+                            partial(self._parse_image, image),
+                            page_number=1,
+                            attempt_ledger=attempts,
+                        )
+                        api_attempts.extend(attempts)
+                        append_attempt_usages(page_usages, attempts)
                         pages = [
                             {
                                 "page_index": 0,
@@ -699,7 +713,7 @@ class AnthropicProvider(Provider):
                     pdf_pages = split_pdf_to_pages(str(source_path))
                     pages = []
                     for page_index, (pdf_bytes, w, h) in enumerate(pdf_pages):
-                        attempts: list[dict[str, object]] = []
+                        attempts = []
                         items, raw_content, usage = run_page_with_retries(
                             partial(self._parse_pdf_page_with_layout, pdf_bytes),
                             provider_name=pipeline.provider_name,
@@ -798,24 +812,23 @@ class AnthropicProvider(Provider):
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-            # Aggregate token usage across pages
-            total_input = sum(u["input_tokens"] for u in page_usages)
-            total_output = sum(u["output_tokens"] for u in page_usages)
-            total_thinking = sum(u["thinking_tokens"] for u in page_usages)
-            total_all = sum(u["total_tokens"] for u in page_usages)
-
-            usage_summary = (
-                {
-                    "input_tokens": total_input,
-                    "output_tokens": total_output,
-                    "thinking_tokens": total_thinking,
-                    "total_tokens": total_all,
-                    "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
-                    "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
-                }
-                if attempt_usages_complete(page_usages)
-                else {}
-            )
+            # Aggregate token usage only when every physical call reported it.
+            usage_summary: dict[str, int | float] = {}
+            if attempt_usages_complete(page_usages):
+                total_input = sum(u["input_tokens"] for u in page_usages)
+                total_output = sum(u["output_tokens"] for u in page_usages)
+                total_thinking = sum(u["thinking_tokens"] for u in page_usages)
+                total_all = sum(u["total_tokens"] for u in page_usages)
+                usage_summary.update(
+                    {
+                        "input_tokens": total_input,
+                        "output_tokens": total_output,
+                        "thinking_tokens": total_thinking,
+                        "total_tokens": total_all,
+                        "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
+                        "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                    }
+                )
             pricing = self._get_pricing()
             if pricing is not None and attempt_usages_complete(page_usages):
                 input_rate, output_rate = pricing
