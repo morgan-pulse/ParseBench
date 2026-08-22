@@ -803,16 +803,11 @@ class GoogleProvider(Provider):
                         img_bytes = self._image_to_bytes(image)
 
                         try:
-                            page_result = run_page_with_retries(
-                                partial(
-                                    runner.parse_page,
-                                    page_index=page_index,
-                                    image=image,
-                                    image_bytes=img_bytes,
-                                    image_mime_type="image/jpeg",
-                                ),
-                                provider_name=pipeline.provider_name,
-                                page_number=page_index + 1,
+                            page_result = runner.parse_page(
+                                page_index=page_index,
+                                image=image,
+                                image_bytes=img_bytes,
+                                image_mime_type="image/jpeg",
                             )
                             self._annotate_api_calls_with_costs(page_result.api_calls)
                             page_usages.extend(

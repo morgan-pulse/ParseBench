@@ -46,16 +46,22 @@ def _response(text: str | None) -> SimpleNamespace:
 
 
 class _Models:
-    def __init__(self, responses: list[SimpleNamespace]) -> None:
+    def __init__(self, responses: list[object]) -> None:
         self._responses = iter(responses)
         self.calls = 0
+        self.requests: list[dict[str, object]] = []
 
     def generate_content(self, **kwargs: object) -> SimpleNamespace:
         self.calls += 1
-        return next(self._responses)
+        self.requests.append(kwargs)
+        response = next(self._responses)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, SimpleNamespace)
+        return response
 
 
-def _provider(mode: str, responses: list[SimpleNamespace]) -> tuple[GoogleProvider, _Models]:
+def _provider(mode: str, responses: list[object]) -> tuple[GoogleProvider, _Models]:
     provider = object.__new__(GoogleProvider)
     models = _Models(responses)
     provider._client = SimpleNamespace(models=models)
@@ -75,6 +81,16 @@ def _provider(mode: str, responses: list[SimpleNamespace]) -> tuple[GoogleProvid
     provider._bbox_scale = 1000
     provider._layout_system_prompt = "layout system prompt"
     provider._layout_user_prompt = "layout user prompt"
+    return provider, models
+
+
+def _agentic_provider(responses: list[object]) -> tuple[GoogleProvider, _Models]:
+    provider, models = _provider("parse_with_layout_agentic_vision", responses)
+    provider._types.ToolCodeExecution = lambda: SimpleNamespace()
+    provider._types.Tool = lambda **kwargs: SimpleNamespace(**kwargs)
+    provider._enable_explicit_context_cache = False
+    provider._context_cache_ttl_seconds = 900
+    provider._min_cacheable_tokens = 1024
     return provider, models
 
 
@@ -122,3 +138,115 @@ def test_google_page_two_empty_responses_abort_without_partial_payload(
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
             image.getpixel((0, 0))
+
+
+def test_google_agentic_page_two_malformed_then_transient_exhausts_one_page_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    rendered: list[Image.Image] = []
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+
+    def render_page(path: str, dpi: int, first_page: int, last_page: int) -> list[Image.Image]:
+        assert Path(path) == source
+        assert first_page == last_page
+        image = Image.new("RGB", (8 + first_page, 8), "white")
+        rendered.append(image)
+        return [image]
+
+    monkeypatch.setattr("pdf2image.convert_from_path", render_page)
+    monkeypatch.setattr(
+        "parse_bench.inference.providers.parse.google_agentic_vision.time.sleep",
+        lambda delay: None,
+    )
+    valid = '<div data-bbox="[0,0,1000,1000]" data-label="Text">page one</div>'
+    malformed_one = _response("not wrapped")
+    malformed_one.usage_metadata = SimpleNamespace(
+        prompt_token_count=7,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=3,
+        thoughts_token_count=1,
+        total_token_count=11,
+    )
+    malformed_three = _response("still not wrapped")
+    malformed_three.usage_metadata = SimpleNamespace(
+        prompt_token_count=8,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=4,
+        thoughts_token_count=1,
+        total_token_count=13,
+    )
+    provider, models = _agentic_provider(
+        [_response(valid), malformed_one, TimeoutError("connection timeout"), malformed_three]
+    )
+
+    with pytest.raises(
+        ProviderRetryExhaustedError,
+        match="Google Agentic Vision page 2 failed after 3 attempts",
+    ) as exc_info:
+        provider.run_inference(_pipeline(), _request(source))
+
+    assert models.calls == 4
+    assert len(models.requests) == 4
+    assert len(rendered) == 2
+    debug_payload = exc_info.value.debug_payload
+    assert isinstance(debug_payload, dict)
+    calls = debug_payload["api_calls"]
+    assert [call["page_index"] for call in calls] == [1, 1, 1]
+    assert [call["attempt"] for call in calls] == [1, 2, 3]
+    assert [call["usage"]["total_tokens"] for call in calls] == [11, 0, 13]
+    assert calls[0]["response"] is not None
+    assert calls[1]["error"]["type"] == "ProviderTransientError"
+    assert calls[2]["response"] is not None
+    for image in rendered:
+        with pytest.raises(ValueError, match="Operation on closed image"):
+            image.getpixel((0, 0))
+
+
+def test_google_agentic_mixed_failures_can_succeed_on_final_owned_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "page.png"
+    with Image.new("RGB", (9, 8), "white") as image:
+        image.save(source)
+    monkeypatch.setattr(
+        "parse_bench.inference.providers.parse.google_agentic_vision.time.sleep",
+        lambda delay: None,
+    )
+    malformed = _response("not wrapped")
+    malformed.usage_metadata = SimpleNamespace(
+        prompt_token_count=5,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=2,
+        thoughts_token_count=1,
+        total_token_count=8,
+    )
+    valid = '<div data-bbox="[0,0,1000,1000]" data-label="Text">success</div>'
+    successful = _response(valid)
+    successful.usage_metadata = SimpleNamespace(
+        prompt_token_count=6,
+        tool_use_prompt_token_count=0,
+        cached_content_token_count=0,
+        candidates_token_count=3,
+        thoughts_token_count=1,
+        total_token_count=10,
+    )
+    provider, models = _agentic_provider([malformed, TimeoutError("network reset"), successful])
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert models.calls == 3
+    assert result.raw_output["num_api_calls"] == 3
+    assert result.raw_output["total_tokens"] == 18
+    page = result.raw_output["pages"][0]
+    assert page["markdown"] == "success"
+    calls = page["api_calls"]
+    assert [call["attempt"] for call in calls] == [1, 2, 3]
+    assert [call["usage"]["total_tokens"] for call in calls] == [8, 0, 10]
+    assert calls[1]["error"]["type"] == "ProviderTransientError"

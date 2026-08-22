@@ -6,13 +6,18 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.inference.providers.parse._layout_utils import LABEL_MAP, items_to_markdown
 from parse_bench.schemas.parse_output import LayoutItemIR, LayoutSegmentIR, ParseLayoutPageIR
 
@@ -684,7 +689,7 @@ class GoogleAgenticVisionRunner:
         image_mime_type: str,
         max_attempts: int = 3,
     ) -> AgenticVisionPageResult:
-        """Run one Agentic Vision page parse with retry on malformed final wrapped output."""
+        """Run one Agentic Vision page parse with the complete page retry budget."""
         cache_info = self._maybe_create_prefix_cache()
         use_cached_prefix = cache_info is not None
         cache_name = cache_info.name if cache_info is not None else None
@@ -726,7 +731,30 @@ class GoogleAgenticVisionRunner:
                     config=self._build_generation_config(cache_name),
                 )
             except Exception as exc:
-                raise classify_gemini_api_exception(exc) from exc
+                classified = classify_gemini_api_exception(exc)
+                if not isinstance(classified, ProviderTransientError):
+                    raise classified from exc
+
+                last_error = str(classified)
+                api_calls.append(
+                    {
+                        "page_index": page_index,
+                        "attempt": attempt,
+                        "request": request_summary,
+                        "response": None,
+                        "response_parts": [],
+                        "usage": extract_usage_from_response(None),
+                        "final_text": "",
+                        "error": {
+                            "type": type(classified).__name__,
+                            "message": last_error,
+                        },
+                        "cost_usd": 0.0,
+                    }
+                )
+                if attempt < max_attempts:
+                    time.sleep(2.0 * (2 ** (attempt - 1)))
+                continue
 
             usage = extract_usage_from_response(response)
             response_parts = extract_serialized_response_parts(response)
@@ -773,8 +801,8 @@ class GoogleAgenticVisionRunner:
 
             retry_instruction = build_retry_instruction(response, last_error, attempt=attempt)
 
-        raise ProviderPermanentError(
-            f"Failed to obtain valid Agentic Vision wrapped layout output after {max_attempts} attempts: {last_error}",
+        raise ProviderRetryExhaustedError(
+            f"Google Agentic Vision page {page_index + 1} failed after {max_attempts} attempts: {last_error}",
             debug_payload={
                 "mode": "parse_with_layout_agentic_vision",
                 "page_index": page_index,
