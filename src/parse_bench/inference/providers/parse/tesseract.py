@@ -1,8 +1,9 @@
 """Provider for Tesseract OCR PARSE."""
 
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from parse_bench.inference.providers.base import (
     Provider,
@@ -10,7 +11,10 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
-from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    open_document_page_images,
+    run_page_with_retries,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -63,31 +67,47 @@ class TesseractProvider(Provider):
         except ImportError as e:
             raise ProviderConfigError("pytesseract package not installed. Run: pip install pytesseract") from e
 
+        def ocr_page(image: Any) -> str:
+            try:
+                if self._output_type == "text":
+                    return cast(str, pytesseract.image_to_string(image, lang=self._lang, config=self._config))
+                if self._output_type == "dict":
+                    data = pytesseract.image_to_data(
+                        image,
+                        lang=self._lang,
+                        config=self._config,
+                        output_type=pytesseract.Output.DICT,
+                    )
+                    return " ".join(word for word in data.get("text", []) if word.strip())
+                if self._output_type == "data":
+                    return cast(str, pytesseract.image_to_data(image, lang=self._lang, config=self._config))
+                if self._output_type == "boxes":
+                    return cast(str, pytesseract.image_to_boxes(image, lang=self._lang, config=self._config))
+                if self._output_type == "osd":
+                    return cast(str, pytesseract.image_to_osd(image, config=self._config))
+                return cast(str, pytesseract.image_to_string(image, lang=self._lang, config=self._config))
+            except Exception as exc:
+                error_str = str(exc).lower()
+                if any(keyword in error_str for keyword in ["timeout", "memory", "resource"]):
+                    raise ProviderTransientError(f"Transient error during OCR: {exc}") from exc
+                if "tesseract" in error_str and any(
+                    keyword in error_str for keyword in ["not found", "not installed", "command"]
+                ):
+                    raise ProviderConfigError(
+                        "Tesseract OCR engine not found. Please install Tesseract: "
+                        "https://github.com/tesseract-ocr/tesseract"
+                    ) from exc
+                raise ProviderPermanentError(f"Error during OCR: {exc}") from exc
+
         try:
             pages = []
             with open_document_page_images(pdf_path, dpi=self._dpi) as images:
                 for page_index, image in enumerate(images):
-                    # A failed page invalidates the document. Let the outer
-                    # classifier preserve retryable failures instead of
-                    # emitting a partial document with an error placeholder.
-                    if self._output_type == "text":
-                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "dict":
-                        data = pytesseract.image_to_data(
-                            image,
-                            lang=self._lang,
-                            config=self._config,
-                            output_type=pytesseract.Output.DICT,
-                        )
-                        text = " ".join([word for word in data.get("text", []) if word.strip()])
-                    elif self._output_type == "data":
-                        text = pytesseract.image_to_data(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "boxes":
-                        text = pytesseract.image_to_boxes(image, lang=self._lang, config=self._config)
-                    elif self._output_type == "osd":
-                        text = pytesseract.image_to_osd(image, config=self._config)
-                    else:
-                        text = pytesseract.image_to_string(image, lang=self._lang, config=self._config)
+                    text = run_page_with_retries(
+                        partial(ocr_page, image),
+                        provider_name="tesseract",
+                        page_number=page_index + 1,
+                    )
 
                     pages.append(
                         {

@@ -11,7 +11,11 @@ import httpx
 import pytest
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.inference.providers.parse import kdl_frontier_nano as kdl
 from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
 from parse_bench.schemas.pipeline import PipelineSpec
@@ -147,7 +151,7 @@ def _track_pillow_derivatives(monkeypatch: pytest.MonkeyPatch) -> list[Image.Ima
 
 @pytest.mark.parametrize(
     ("status_code", "error_type", "attempts"),
-    [(400, ProviderPermanentError, 1), (429, ProviderTransientError, 3), (503, ProviderTransientError, 3)],
+    [(400, ProviderPermanentError, 1), (429, ProviderTransientError, 1), (503, ProviderTransientError, 1)],
 )
 def test_nano_chat_classifies_http_failures(
     status_code: int,
@@ -194,10 +198,10 @@ def test_nano_chat_retries_invalid_responses_and_preserves_last_failure(
 
     monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
 
-    with pytest.raises(ProviderTransientError, match="failed after 3 attempts") as caught:
+    with pytest.raises(ProviderTransientError, match="Stage request failed") as caught:
         asyncio.run(kdl._nano_chat(Client(), "http://provider.invalid", {}, asyncio.Semaphore(1)))
 
-    assert calls == 3
+    assert calls == 1
     assert isinstance(caught.value.__cause__, IndexError)
 
 
@@ -223,11 +227,16 @@ def test_kdl_real_page_stage_closes_every_derivative(
 
     if not fail_recognition:
         page.paste("white", (6, 6, 58, 58))
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
     monkeypatch.setattr(kdl, "_nano_chat", chat)
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
     engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
 
     if fail_recognition:
-        with pytest.raises(ProviderTransientError, match="recognition exhausted"):
+        with pytest.raises(ProviderRetryExhaustedError, match="KDL page 1 failed after 3 attempts"):
             asyncio.run(engine._parse_page(object(), asyncio.Semaphore(1), page, 1))
     else:
         assert asyncio.run(engine._parse_page(object(), asyncio.Semaphore(1), page, 1)) == []
@@ -238,7 +247,7 @@ def test_kdl_real_page_stage_closes_every_derivative(
     page.close()
 
 
-def test_kdl_real_page_two_stage_failure_aborts_document(
+def test_kdl_real_page_two_stage_failure_retries_only_page_two(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pages = [_content_image(), _content_image()]
@@ -251,22 +260,55 @@ def test_kdl_real_page_two_stage_failure_aborts_document(
         nonlocal calls
         calls += 1
         if calls == 3:
-            raise ProviderTransientError("page two layout exhausted")
-        return layout if calls == 1 else "page one text"
+            raise ProviderTransientError("page two layout timed out")
+        return layout if calls in {1, 4} else f"page text {calls}"
 
     monkeypatch.setattr(kdl, "_nano_chat", chat)
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
     engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
-    successful_result = None
 
-    with pytest.raises(ProviderTransientError, match="page two layout exhausted"):
-        successful_result = asyncio.run(engine.parse_pages(pages))
+    result = asyncio.run(engine.parse_pages(pages))
 
-    assert successful_result is None
-    assert calls == 3
+    assert calls == 5
+    assert [page["page_number"] for page in result["pages"]] == [1, 2]
     assert derived
     assert all(isinstance(image.close, Mock) and image.close.call_count == 1 for image in derived)
     for page in pages:
         assert page.getpixel((0, 0)) == (255, 255, 255)
+        page.close()
+
+
+def test_kdl_exhausted_page_two_retry_is_terminal_without_replaying_page_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = [_content_image(), _content_image()]
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    layout = "<|box_start|>100 100 900 900<|box_end|><|ref_start|>text<|ref_end|>"
+    calls = 0
+
+    async def chat(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise ProviderTransientError("page two unavailable")
+        return layout if calls == 1 else "page one text"
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl, "_nano_chat", chat)
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
+
+    with pytest.raises(ProviderRetryExhaustedError, match="KDL page 2 failed after 3 attempts"):
+        asyncio.run(engine.parse_pages(pages))
+
+    assert calls == 5
+    for page in pages:
         page.close()
 
 

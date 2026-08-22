@@ -4,6 +4,7 @@ import io
 import logging
 import os
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
 from parse_bench.inference.providers.parse._multipage_image import (
     close_derived_images,
     open_document_page_images,
+    run_page_with_retries,
 )
 from parse_bench.inference.providers.parse.google_agentic_vision import (
     GoogleAgenticVisionRunner,
@@ -499,21 +501,7 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                reason1 = self._failure_reason(response)
-                # Single retry on empty response
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=contents,
-                    config=gen_config,
-                )
-                usage = self._extract_usage(response)
-                text = self._extract_text(response)
-
-            if text is None:
-                reason2 = self._failure_reason(response)
-                raise ProviderTransientError(
-                    f"Gemini API returned no text after 2 attempts: 1st={reason1}, 2nd={reason2}"
-                )
+                raise ProviderTransientError(f"Gemini API returned no text: {self._failure_reason(response)}")
             return text, usage
 
         except (ProviderPermanentError, ProviderTransientError):
@@ -565,20 +553,7 @@ class GoogleProvider(Provider):
             text = self._extract_text(response)
 
             if text is None:
-                reason1 = self._failure_reason(response)
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=contents,
-                    config=gen_config,
-                )
-                usage = self._extract_usage(response)
-                text = self._extract_text(response)
-
-            if text is None:
-                reason2 = self._failure_reason(response)
-                raise ProviderTransientError(
-                    f"Gemini API returned no layout text after 2 attempts: 1st={reason1}, 2nd={reason2}"
-                )
+                raise ProviderTransientError(f"Gemini API returned no layout text: {self._failure_reason(response)}")
 
             items = swap_gemini_bbox(parse_layout_blocks(text))
             return items, text, usage
@@ -832,11 +807,16 @@ class GoogleProvider(Provider):
                         img_bytes = self._image_to_bytes(image)
 
                         try:
-                            page_result = runner.parse_page(
-                                page_index=page_index,
-                                image=image,
-                                image_bytes=img_bytes,
-                                image_mime_type="image/jpeg",
+                            page_result = run_page_with_retries(
+                                partial(
+                                    runner.parse_page,
+                                    page_index=page_index,
+                                    image=image,
+                                    image_bytes=img_bytes,
+                                    image_mime_type="image/jpeg",
+                                ),
+                                provider_name=pipeline.provider_name,
+                                page_number=page_index + 1,
                             )
                             self._annotate_api_calls_with_costs(page_result.api_calls)
                             page_usages.extend(
@@ -875,7 +855,11 @@ class GoogleProvider(Provider):
                 with open_document_page_images(source_path, dpi=self._dpi) as images:
                     for page_index, image in enumerate(images):
                         if self._mode == "parse_with_layout":
-                            items, raw_content, usage = self._parse_image_with_layout(image)
+                            items, raw_content, usage = run_page_with_retries(
+                                partial(self._parse_image_with_layout, image),
+                                provider_name=pipeline.provider_name,
+                                page_number=page_index + 1,
+                            )
                             page_usages.append(usage)
                             pages.append(
                                 {
@@ -887,7 +871,11 @@ class GoogleProvider(Provider):
                                 }
                             )
                         else:
-                            markdown, usage = self._parse_image(image)
+                            markdown, usage = run_page_with_retries(
+                                partial(self._parse_image, image),
+                                provider_name=pipeline.provider_name,
+                                page_number=page_index + 1,
+                            )
                             page_usages.append(usage)
                             pages.append(
                                 {

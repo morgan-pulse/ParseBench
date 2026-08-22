@@ -5,6 +5,7 @@ import io
 import math
 import os
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
 from parse_bench.inference.providers.parse._multipage_image import (
     close_derived_images,
     open_document_page_images,
+    run_page_with_retries,
 )
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
@@ -687,7 +689,11 @@ class AnthropicProvider(Provider):
                             # dims are exactly what the model perceives.
                             page = self._resize_to_perceived_size(image) if self._bbox_scale is None else image
                             try:
-                                items, raw_content, usage = self._parse_image_with_layout(page)
+                                items, raw_content, usage = run_page_with_retries(
+                                    partial(self._parse_image_with_layout, page),
+                                    provider_name=pipeline.provider_name,
+                                    page_number=page_index + 1,
+                                )
                                 page_usages.append(usage)
                                 pages.append(
                                     {
@@ -702,7 +708,11 @@ class AnthropicProvider(Provider):
                                 if page is not image:
                                     page.close()
                         else:
-                            markdown, usage = self._parse_image(image)
+                            markdown, usage = run_page_with_retries(
+                                partial(self._parse_image, image),
+                                provider_name=pipeline.provider_name,
+                                page_number=page_index + 1,
+                            )
                             page_usages.append(usage)
                             pages.append(
                                 {

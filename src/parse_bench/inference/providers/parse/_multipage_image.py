@@ -13,21 +13,52 @@ from __future__ import annotations
 
 import math
 import tempfile
+import time
 from collections.abc import Callable, Generator, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderConfigError, ProviderPermanentError
+from parse_bench.inference.providers.base import (
+    ProviderConfigError,
+    ProviderPermanentError,
+    ProviderRateLimitError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, RawInferenceResult
 from parse_bench.schemas.product import ProductType
 
 _MULTIPAGE_KEY = "_parse_bench_multipage"
+_PAGE_MAX_ATTEMPTS = 3
+_PAGE_INITIAL_BACKOFF_S = 2.0
+
+
+def run_page_with_retries[PageResultT](
+    call: Callable[[], PageResultT],
+    *,
+    provider_name: str,
+    page_number: int,
+) -> PageResultT:
+    """Run one billable page with the sole retry budget for that page."""
+
+    for attempt in range(_PAGE_MAX_ATTEMPTS):
+        try:
+            return call()
+        except (ProviderTransientError, ProviderRateLimitError) as exc:
+            if attempt == _PAGE_MAX_ATTEMPTS - 1:
+                raise ProviderRetryExhaustedError(
+                    f"{provider_name} page {page_number} failed after {_PAGE_MAX_ATTEMPTS} attempts: {exc}"
+                ) from exc
+            time.sleep(_PAGE_INITIAL_BACKOFF_S * (2**attempt))
+
+    raise AssertionError("unreachable")
 
 
 @dataclass(frozen=True)
@@ -316,7 +347,11 @@ def run_pdf_pages(
                 page_path = Path(temp_dir) / f"page-{page_index + 1:06d}.png"
                 _save_png(image, page_path)
                 page_request = request.model_copy(update={"source_file_path": str(page_path)})
-                page_result = run_single_image(pipeline, page_request)
+                page_result = run_page_with_retries(
+                    partial(run_single_image, pipeline, page_request),
+                    provider_name=pipeline.provider_name,
+                    page_number=page_index + 1,
+                )
                 page_results.append(
                     {
                         "page_index": page_index,

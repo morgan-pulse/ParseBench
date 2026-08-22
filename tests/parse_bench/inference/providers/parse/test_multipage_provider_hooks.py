@@ -223,16 +223,7 @@ def test_adapter_provider_closes_rendered_page_when_persistence_fails(
         rendered[0].getpixel((0, 0))
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        ProviderPermanentError("page two is invalid"),
-        ProviderTransientError("page two timed out"),
-    ],
-    ids=["permanent", "transient"],
-)
 def test_paddleocr_page_two_failure_aborts_without_partial_result(
-    failure: Exception,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,12 +238,12 @@ def test_paddleocr_page_two_failure_aborts_without_partial_result(
         nonlocal calls
         calls += 1
         if calls == 2:
-            raise failure
+            raise ProviderPermanentError("page two is invalid")
         return {"markdown": "page 1"}
 
     provider._run_inference_async = run_inference_async
 
-    with pytest.raises(type(failure), match=str(failure)):
+    with pytest.raises(ProviderPermanentError, match="page two is invalid"):
         successful_result = provider.run_inference(_pipeline("paddleocr"), _request(source))
 
     assert successful_result is None
@@ -265,18 +256,20 @@ def test_paddleocr_page_two_failure_aborts_without_partial_result(
 
 @pytest.mark.parametrize(("module_name", "class_name", "expected_dpi"), ADAPTER_PROVIDERS)
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "expected_error", "expected_calls"),
     [
-        ProviderPermanentError("page two is invalid"),
-        ProviderTransientError("page two timed out"),
+        (ProviderPermanentError("page two is invalid"), ProviderPermanentError, [1, 2]),
+        (ProviderTransientError("page two timed out"), None, [1, 2, 3]),
     ],
     ids=["permanent", "transient"],
 )
-def test_adapter_provider_page_failure_aborts_without_partial_result(
+def test_adapter_provider_owns_page_failure_handling(
     module_name: str,
     class_name: str,
     expected_dpi: int,
     failure: Exception,
+    expected_error: type[Exception] | None,
+    expected_calls: list[int],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,13 +278,15 @@ def test_adapter_provider_page_failure_aborts_without_partial_result(
     rendered = _mock_two_page_pdf(source, monkeypatch)
     provider = _provider(module_name, class_name, expected_dpi)
     calls = _install_local_boundary(provider, module_name, failure=failure, fail_on_call=2)
-    successful_result = None
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
 
-    with pytest.raises(type(failure), match=str(failure)):
-        successful_result = provider.run_inference(_pipeline(module_name), _request(source))
+    if expected_error is not None:
+        with pytest.raises(expected_error, match=str(failure)):
+            provider.run_inference(_pipeline(module_name), _request(source))
+    else:
+        assert provider.run_inference(_pipeline(module_name), _request(source)) is not None
 
-    assert successful_result is None
-    assert calls == [1, 2]
+    assert calls == expected_calls
     assert len(rendered) == 2
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):

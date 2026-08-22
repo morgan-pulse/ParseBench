@@ -11,7 +11,6 @@ import base64
 import io
 import os
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -24,10 +23,12 @@ from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
     ProviderPermanentError,
-    ProviderRetryExhaustedError,
     ProviderTransientError,
 )
-from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    open_document_page_images,
+    run_page_with_retries,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -291,23 +292,11 @@ class DotsOcrParseProvider(Provider):
 
     def _call_page_with_retries(self, image: Image.Image, page_number: int) -> str:
         """Own transient retries at the billable page request boundary."""
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                return self._call_endpoint(image)
-            except ProviderTransientError as exc:
-                if attempt == max_attempts - 1:
-                    raise ProviderRetryExhaustedError(
-                        f"dots.ocr page {page_number} failed after {max_attempts} attempts: {exc}"
-                    ) from exc
-                delay = 15 * (2**attempt)
-                print(
-                    f"[dots.ocr] Transient error on page {page_number}: {exc}. "
-                    f"Retrying in {delay}s (attempt {attempt + 1}/{max_attempts})..."
-                )
-                time.sleep(delay)
-
-        raise AssertionError("unreachable")
+        return run_page_with_retries(
+            lambda: self._call_endpoint(image),
+            provider_name="dots.ocr",
+            page_number=page_number,
+        )
 
     def _run_inference_pages(self, source_path: Path) -> dict[str, Any]:
         """Convert source file to images and run inference on each page."""

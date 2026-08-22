@@ -265,7 +265,7 @@ def test_refactored_provider_propagates_permanent_failure_without_partial_docume
     ("module_name", "class_name", "dpi"),
     [provider for provider in LEGACY_PROVIDERS if provider[0] != "dots_ocr"],
 )
-def test_refactored_provider_propagates_transient_page_failure_for_document_retry(
+def test_refactored_provider_retries_only_the_failed_page(
     module_name: str,
     class_name: str,
     dpi: int,
@@ -283,12 +283,14 @@ def test_refactored_provider_propagates_transient_page_failure_for_document_retr
         failure=ProviderTransientError("timeout on page two"),
         fail_on_call=2,
     )
+    delays: list[float] = []
+    monkeypatch.setattr("time.sleep", delays.append)
 
-    with pytest.raises(ProviderTransientError, match="timeout on page two"):
-        provider.run_inference(_pipeline(module_name), _request(source))
+    assert provider.run_inference(_pipeline(module_name), _request(source)) is not None
 
     boundary_calls = provider._textract_client.calls if module_name == "textract" else calls
-    assert boundary_calls == 2 if module_name == "textract" else [1, 2]
+    assert boundary_calls == 3 if module_name == "textract" else [1, 2, 3]
+    assert delays == [2.0]
     assert len(rendered) == 2
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
@@ -318,7 +320,7 @@ def test_dots_ocr_retries_only_the_failed_page_after_transient_failure(
     result = provider.normalize(raw_result)
 
     assert page_widths == [9, 10, 10]
-    assert delays == [15]
+    assert delays == [2.0]
     assert result.output.markdown == "page 1\n\npage 2"
     assert [page.page_index for page in result.output.pages] == [0, 1]
 
@@ -346,7 +348,7 @@ def test_dots_ocr_raises_terminal_error_after_page_retries_exhausted(
         provider.run_inference(_pipeline("dots_ocr"), _request(source))
 
     assert page_widths == [9, 9, 9]
-    assert delays == [15, 30]
+    assert delays == [2.0, 4.0]
 
 
 def test_dots_ocr_malformed_layout_aborts_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

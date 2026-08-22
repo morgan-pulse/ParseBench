@@ -8,12 +8,17 @@ import pytest
 from PIL import Image
 
 from parse_bench.evaluation.stats import build_operational_stats
-from parse_bench.inference.providers.base import ProviderPermanentError
+from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.inference.providers.parse._multipage_image import (
     normalize_pdf_pages,
     open_document_page_images,
     run_pdf_pages,
 )
+from parse_bench.inference.runner import InferenceRunner
 from parse_bench.schemas.parse_output import ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, RawInferenceResult
@@ -167,6 +172,107 @@ def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, 
     assert stats["input_tokens"].value == 60
     assert stats["input_tokens_per_page"].value == 20
     assert stats["num_api_calls"].value == 3
+
+
+def test_transient_page_retry_does_not_replay_prior_page_or_duplicate_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 3})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), (first_page, 0, 0))],
+    )
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+    requested_pages: list[int] = []
+
+    def run_single_image(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        with Image.open(request.source_file_path) as image:
+            page_number = image.getpixel((0, 0))[0]
+        requested_pages.append(page_number)
+        if requested_pages == [1, 2]:
+            raise ProviderTransientError("page two timed out")
+        now = datetime.now()
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output={"markdown": f"page {page_number}", "num_api_calls": 1},
+            started_at=now,
+            completed_at=now,
+            latency_in_ms=1,
+        )
+
+    raw_result = run_pdf_pages(_pipeline(), _request(source), dpi=144, run_single_image=run_single_image)
+
+    assert raw_result is not None
+    assert requested_pages == [1, 2, 2, 3]
+    assert raw_result.raw_output["num_api_calls"] == 3
+    envelope = raw_result.raw_output["_parse_bench_multipage"]
+    assert isinstance(envelope, dict)
+    assert [page["page_index"] for page in envelope["pages"]] == [0, 1, 2]
+
+
+def test_exhausted_page_retry_is_terminal_to_document_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 2})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), (first_page, 0, 0))],
+    )
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+    requested_pages: list[int] = []
+    document_attempts = 0
+
+    def run_single_image(pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+        with Image.open(request.source_file_path) as image:
+            page_number = image.getpixel((0, 0))[0]
+        requested_pages.append(page_number)
+        if page_number == 2:
+            raise ProviderTransientError("still unavailable")
+        now = datetime.now()
+        return RawInferenceResult(
+            request=request,
+            pipeline=pipeline,
+            pipeline_name=pipeline.pipeline_name,
+            product_type=request.product_type,
+            raw_output={"markdown": "page 1", "num_api_calls": 1},
+            started_at=now,
+            completed_at=now,
+            latency_in_ms=1,
+        )
+
+    class AdapterProvider:
+        def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
+            nonlocal document_attempts
+            document_attempts += 1
+            result = run_pdf_pages(pipeline, request, dpi=144, run_single_image=run_single_image)
+            assert result is not None
+            return result
+
+    runner = object.__new__(InferenceRunner)
+    runner.use_rich = False
+    runner.job_statuses = {}
+    runner.pipeline = _pipeline()
+    runner.provider = AdapterProvider()
+    runner._prepare_source_file_for_provider = lambda example_id, path: path
+    runner._fetch_parse_job_logs = lambda raw_result, example_id: None
+    runner._save_result = lambda raw_result, normalized_result: None
+
+    raw_result, normalized_result, error = runner._process_document(source, "document", ProductType.PARSE)
+
+    assert raw_result is None
+    assert normalized_result is None
+    assert error is not None and error[2] == ProviderRetryExhaustedError.__name__
+    assert document_attempts == 1
+    assert requested_pages == [1, 2, 2, 2]
 
 
 def test_multipage_aggregation_omits_partial_or_invalid_provider_metadata(tmp_path: Path, monkeypatch) -> None:

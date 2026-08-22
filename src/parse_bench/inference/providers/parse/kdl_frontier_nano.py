@@ -66,6 +66,7 @@ from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
     ProviderPermanentError,
+    ProviderRetryExhaustedError,
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import PageImages, close_derived_images
@@ -2607,32 +2608,24 @@ async def _nano_chat(
     payload: dict,
     semaphore: asyncio.Semaphore,
 ) -> str:
-    """POST a chat request, classifying terminal client and retryable failures."""
-    last_exc: Exception | None = None
+    """POST one stage request and classify failures for the page retry owner."""
     async with semaphore:
-        for attempt in range(3):  # tenacity stop_after_attempt(3) equivalent
-            try:
-                resp = await client.post(
-                    url,
-                    json={**payload, "chat_template_kwargs": {"enable_thinking": False}},
-                )
-                if resp.status_code >= 500 or resp.status_code in (408, 429):
-                    raise httpx.HTTPStatusError(f"{resp.status_code}", request=resp.request, response=resp)
-                if resp.status_code >= 400:
-                    raise ProviderPermanentError(
-                        f"Stage request rejected with HTTP {resp.status_code}: {resp.text[:200]}"
-                    )
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                if not isinstance(content, str) or not content.strip():
-                    raise ValueError("stage response contained no text content")
-                return content
-            except (httpx.HTTPError, TimeoutError, IndexError, KeyError, TypeError, ValueError) as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(min(10.0, 2.0 * (2**attempt)))
-    assert last_exc is not None
-    raise ProviderTransientError(f"Stage request failed after 3 attempts: {last_exc}") from last_exc
+        try:
+            resp = await client.post(
+                url,
+                json={**payload, "chat_template_kwargs": {"enable_thinking": False}},
+            )
+            if resp.status_code >= 500 or resp.status_code in (408, 429):
+                raise httpx.HTTPStatusError(f"{resp.status_code}", request=resp.request, response=resp)
+            if resp.status_code >= 400:
+                raise ProviderPermanentError(f"Stage request rejected with HTTP {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("stage response contained no text content")
+            return content
+        except (httpx.HTTPError, TimeoutError, IndexError, KeyError, TypeError, ValueError) as exc:
+            raise ProviderTransientError(f"Stage request failed: {exc}") from exc
 
 
 def _nano_group_by_bucket(
@@ -2955,14 +2948,25 @@ class _NanoEngine:
         image: Image.Image,
         page_no: int,
     ) -> list[dict[str, Any]]:
-        with close_derived_images(image) as track:
-            return await self._parse_page_with_owned_images(
-                client,
-                semaphore,
-                image,
-                page_no,
-                track,
-            )
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                with close_derived_images(image) as track:
+                    return await self._parse_page_with_owned_images(
+                        client,
+                        semaphore,
+                        image,
+                        page_no,
+                        track,
+                    )
+            except ProviderTransientError as exc:
+                if attempt == max_attempts - 1:
+                    raise ProviderRetryExhaustedError(
+                        f"KDL page {page_no} failed after {max_attempts} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(2.0 * (2**attempt))
+
+        raise AssertionError("unreachable")
 
     async def _parse_page_with_owned_images(
         self,

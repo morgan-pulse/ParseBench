@@ -15,6 +15,7 @@ https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-li
 import io
 import os
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -39,6 +40,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
 from parse_bench.inference.providers.parse._multipage_image import (
     close_derived_images,
     open_document_page_images,
+    run_page_with_retries,
 )
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
@@ -376,7 +378,11 @@ class AmazonNovaProvider(Provider):
             pages: list[dict[str, Any]] = []
             with open_document_page_images(source_path, dpi=self._dpi) as images:
                 for page_index, image in enumerate(images):
-                    items, raw_content, usage, stop_reason = self._parse_image_with_layout(image)
+                    items, raw_content, usage, stop_reason = run_page_with_retries(
+                        partial(self._parse_image_with_layout, image),
+                        provider_name=pipeline.provider_name,
+                        page_number=page_index + 1,
+                    )
                     page_usages.append(usage)
                     pages.append(
                         {

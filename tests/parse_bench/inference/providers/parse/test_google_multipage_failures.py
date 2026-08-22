@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderTransientError
+from parse_bench.inference.providers.base import ProviderRetryExhaustedError
 from parse_bench.inference.providers.parse.google import GoogleProvider
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -81,11 +81,11 @@ def _provider(mode: str, responses: list[SimpleNamespace]) -> tuple[GoogleProvid
 @pytest.mark.parametrize(
     ("mode", "page_one", "message"),
     [
-        ("image", "page one", "returned no text after 2 attempts"),
+        ("image", "page one", "returned no text"),
         (
             "parse_with_layout",
             '<div data-bbox="[0,0,1000,1000]" data-label="Text">page one</div>',
-            "returned no layout text after 2 attempts",
+            "returned no layout text",
         ),
     ],
 )
@@ -109,14 +109,15 @@ def test_google_page_two_empty_responses_abort_without_partial_payload(
         return [image]
 
     monkeypatch.setattr("pdf2image.convert_from_path", render_page)
-    provider, models = _provider(mode, [_response(page_one), _response(None), _response(None)])
+    provider, models = _provider(mode, [_response(page_one), *[_response(None) for _ in range(3)]])
+    monkeypatch.setattr("time.sleep", lambda delay: None)
     successful_result = None
 
-    with pytest.raises(ProviderTransientError, match=message):
+    with pytest.raises(ProviderRetryExhaustedError, match=message):
         successful_result = provider.run_inference(_pipeline(), _request(source))
 
     assert successful_result is None
-    assert models.calls == 3
+    assert models.calls == 4
     assert len(rendered) == 2
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):

@@ -3,8 +3,9 @@
 import os
 from contextlib import ExitStack
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from parse_bench.inference.providers.base import (
     Provider,
@@ -12,7 +13,10 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
-from parse_bench.inference.providers.parse._multipage_image import open_document_page_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    open_document_page_images,
+    run_page_with_retries,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -244,6 +248,32 @@ class TextractProvider(Provider):
         all_blocks: list[dict[str, Any]] = []
         current_page = 0
 
+        def analyze_page(img_bytes: bytes, feature_types: list[str]) -> dict[str, Any]:
+            from botocore.exceptions import ClientError
+
+            try:
+                if feature_types:
+                    return cast(
+                        dict[str, Any],
+                        self._textract_client.analyze_document(
+                            Document={"Bytes": img_bytes},
+                            FeatureTypes=feature_types,
+                        ),
+                    )
+                return cast(
+                    dict[str, Any],
+                    self._textract_client.detect_document_text(Document={"Bytes": img_bytes}),
+                )
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                error_message = exc.response.get("Error", {}).get("Message", str(exc))
+
+                if error_code in ("ThrottlingException", "ProvisionedThroughputExceededException"):
+                    raise ProviderTransientError(f"Rate limit exceeded: {error_message}") from exc
+                if error_code in ("InvalidParameterException", "UnsupportedDocumentException"):
+                    raise ProviderPermanentError(f"Invalid document: {error_message}") from exc
+                raise ProviderTransientError(f"AWS Textract error: {error_message}") from exc
+
         with open_document_page_images(path, dpi=300) as images:
             for page_num, image in enumerate(images):
                 # Convert PIL image to bytes, resizing if needed for Textract limits
@@ -256,34 +286,16 @@ class TextractProvider(Provider):
                 if self._detect_forms:
                     feature_types.append("FORMS")
 
-                try:
-                    from botocore.exceptions import ClientError
+                response = run_page_with_retries(
+                    partial(analyze_page, img_bytes, feature_types),
+                    provider_name="textract",
+                    page_number=page_num + 1,
+                )
+                for block in response.get("Blocks", []):
+                    block["Page"] = page_num + 1
+                    all_blocks.append(block)
 
-                    if feature_types:
-                        response = self._textract_client.analyze_document(
-                            Document={"Bytes": img_bytes},
-                            FeatureTypes=feature_types,
-                        )
-                    else:
-                        response = self._textract_client.detect_document_text(Document={"Bytes": img_bytes})
-
-                    # Add page number to blocks and accumulate
-                    for block in response.get("Blocks", []):
-                        block["Page"] = page_num + 1
-                        all_blocks.append(block)
-
-                    current_page = page_num + 1
-
-                except ClientError as e:
-                    error_code = e.response.get("Error", {}).get("Code", "")
-                    error_message = e.response.get("Error", {}).get("Message", str(e))
-
-                    if error_code in ("ThrottlingException", "ProvisionedThroughputExceededException"):
-                        raise ProviderTransientError(f"Rate limit exceeded: {error_message}") from e
-                    elif error_code in ("InvalidParameterException", "UnsupportedDocumentException"):
-                        raise ProviderPermanentError(f"Invalid document: {error_message}") from e
-                    else:
-                        raise ProviderTransientError(f"AWS Textract error: {error_message}") from e
+                current_page = page_num + 1
 
         return {
             "Blocks": all_blocks,
