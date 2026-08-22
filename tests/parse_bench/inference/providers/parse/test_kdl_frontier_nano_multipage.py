@@ -312,6 +312,113 @@ def test_kdl_exhausted_page_two_retry_is_terminal_without_replaying_page_one(
         page.close()
 
 
+def test_kdl_recognition_failure_settles_cancelled_sibling_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = (
+        "<|box_start|>50 50 450 450<|box_end|><|ref_start|>text<|ref_end|>"
+        "<|box_start|>550 550 950 950<|box_end|><|ref_start|>text<|ref_end|>"
+    )
+    attempt = 0
+    recognition_calls = 0
+    sibling_started = asyncio.Event()
+    sibling_settled = asyncio.Event()
+    release_success = asyncio.Event()
+
+    async def chat(client: object, url: str, payload: dict[str, object], semaphore: object) -> str:
+        nonlocal attempt, recognition_calls
+        prompt = payload["messages"][0]["content"][1]["text"]  # type: ignore[index]
+        if prompt == kdl._NANO_PROMPTS["layout"]:
+            if attempt:
+                assert sibling_settled.is_set(), "retry began before the failed attempt's sibling settled"
+            attempt += 1
+            return layout
+
+        recognition_calls += 1
+        if attempt == 1:
+            if recognition_calls == 1:
+                await sibling_started.wait()
+                raise ProviderTransientError("recognition failed")
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                sibling_settled.set()
+
+        release_success.set()
+        await release_success.wait()
+        return "recognized"
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl, "_nano_chat", chat)
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 2, 30)
+
+    with _content_image() as page:
+        result = asyncio.run(engine._parse_page(object(), asyncio.Semaphore(2), page, 1))
+
+    assert result
+    assert attempt == 2
+    assert sibling_settled.is_set()
+
+
+def test_kdl_terminal_exhaustion_leaves_no_recognition_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = (
+        "<|box_start|>50 50 450 450<|box_end|><|ref_start|>text<|ref_end|>"
+        "<|box_start|>550 550 950 950<|box_end|><|ref_start|>text<|ref_end|>"
+    )
+    attempt = 0
+    calls_in_attempt = 0
+    active_recognitions = 0
+    sibling_started = [asyncio.Event() for _ in range(3)]
+    sibling_settled = [asyncio.Event() for _ in range(3)]
+
+    async def chat(client: object, url: str, payload: dict[str, object], semaphore: object) -> str:
+        nonlocal attempt, calls_in_attempt, active_recognitions
+        prompt = payload["messages"][0]["content"][1]["text"]  # type: ignore[index]
+        if prompt == kdl._NANO_PROMPTS["layout"]:
+            if attempt:
+                assert sibling_settled[attempt - 1].is_set(), "next attempt began before sibling settlement"
+            attempt += 1
+            calls_in_attempt = 0
+            return layout
+
+        calls_in_attempt += 1
+        active_recognitions += 1
+        try:
+            if calls_in_attempt == 1:
+                await sibling_started[attempt - 1].wait()
+                raise ProviderTransientError("recognition failed")
+            sibling_started[attempt - 1].set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        finally:
+            active_recognitions -= 1
+            if calls_in_attempt > 1:
+                sibling_settled[attempt - 1].set()
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl, "_nano_chat", chat)
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+    engine = kdl._NanoEngine("http://provider.invalid", "test-model", 2, 30)
+
+    with _content_image() as page:
+        with pytest.raises(ProviderRetryExhaustedError, match="KDL page 1 failed after 3 attempts"):
+            asyncio.run(engine._parse_page(object(), asyncio.Semaphore(2), page, 1))
+
+    assert attempt == 3
+    assert active_recognitions == 0
+    assert all(event.is_set() for event in sibling_settled)
+
+
 @pytest.mark.parametrize("fail", [False, True], ids=["success", "encoding-failure"])
 def test_nano_data_uri_closes_rgb_conversion(
     fail: bool,

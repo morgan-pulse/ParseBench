@@ -3005,7 +3005,7 @@ class _NanoEngine:
         # cells only with full-page context; adopted only for single clean OTSL)
         fullpage_table = track(preprocess_for_vlm(image)) if len(buckets["table"]) == 1 else None
 
-        tasks = []
+        recognition_coroutines = []
 
         async def recognize(stage: str, el: dict[str, Any]) -> None:
             pre = el.get("preprocessed_image")
@@ -3035,17 +3035,28 @@ class _NanoEngine:
             await recognize("table", el)
 
         for el in buckets["text"]:
-            tasks.append(recognize("text", el))
+            recognition_coroutines.append(recognize("text", el))
         for i, el in enumerate(buckets["table"]):
             if fullpage_table is not None and i == 0:
-                tasks.append(recognize_table_fullpage(el))
+                recognition_coroutines.append(recognize_table_fullpage(el))
             else:
-                tasks.append(recognize("table", el))
+                recognition_coroutines.append(recognize("table", el))
         for el in buckets["picture"]:
-            tasks.append(recognize("picture", el))
+            recognition_coroutines.append(recognize("picture", el))
         for el in buckets["formula"]:
-            tasks.append(recognize("formula", el))
-        await asyncio.gather(*tasks)
+            recognition_coroutines.append(recognize("formula", el))
+
+        recognition_tasks = [asyncio.create_task(coroutine) for coroutine in recognition_coroutines]
+        try:
+            await asyncio.gather(*recognition_tasks)
+        except BaseException:
+            for task in recognition_tasks:
+                if not task.done():
+                    task.cancel()
+            # Keep page-owned crops and preprocessed images alive until every
+            # billable sibling has observed cancellation and settled.
+            await asyncio.gather(*recognition_tasks, return_exceptions=True)
+            raise
 
         page_elements: list[dict[str, Any]] = []
         picture_idx = 0
