@@ -55,10 +55,9 @@ class ParseProviderPdfClassification:
 
 # Authoritative inventory for every registered parse provider. A provider is
 # either locally page-rasterized (and must declare its bounded execution path)
-# or explicitly classified as not locally page-rasterized. Coverage tests walk
-# registration decorators structurally, including imported aliases, so adding
-# any provider requires a deliberate entry here regardless of the raster API it
-# chooses.
+# or explicitly classified as not locally page-rasterized. Coverage tests compare
+# this inventory with both the authoritative parse-module manifest and the runtime
+# registry, independent of decorator source syntax.
 PARSE_PROVIDER_PDF_CLASSIFICATIONS = (
     ParseProviderPdfClassification(
         "amazon_nova", "amazon_nova", "AmazonNovaProvider", "local-page-raster", 150, "direct"

@@ -11,10 +11,12 @@ import pytest
 from PIL import Image
 
 from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.parse import PARSE_PROVIDER_MODULES
 from parse_bench.inference.providers.parse._multipage_image import (
     IMAGE_BACKED_PDF_PROVIDERS,
     PARSE_PROVIDER_PDF_CLASSIFICATIONS,
 )
+from parse_bench.inference.providers.registry import registered_providers
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -128,48 +130,6 @@ def _mock_two_page_pdf(source: Path, monkeypatch: pytest.MonkeyPatch) -> list[Im
 
     monkeypatch.setattr("pdf2image.convert_from_path", render_page)
     return rendered
-
-
-def _qualified_name(expression: ast.expr, bindings: dict[str, str]) -> str | None:
-    if isinstance(expression, ast.Name):
-        return bindings.get(expression.id, expression.id)
-    if isinstance(expression, ast.Attribute):
-        parent = _qualified_name(expression.value, bindings)
-        return f"{parent}.{expression.attr}" if parent is not None else None
-    return None
-
-
-def _registered_provider_classes(tree: ast.Module) -> list[tuple[str, str]]:
-    bindings: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                local_name = alias.asname or alias.name.split(".")[0]
-                bindings[local_name] = alias.name if alias.asname else local_name
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-
-    registrations: list[tuple[str, str]] = []
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
-                continue
-            target = _qualified_name(decorator.func, bindings)
-            if target not in {
-                "parse_bench.inference.register_provider",
-                "parse_bench.inference.providers.register_provider",
-                "parse_bench.inference.providers.registry.register_provider",
-            }:
-                continue
-            if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
-                continue
-            provider_name = decorator.args[0].value
-            if isinstance(provider_name, str):
-                registrations.append((provider_name, node.name))
-    return registrations
 
 
 @pytest.mark.parametrize(("module_name", "class_name", "expected_dpi"), ADAPTER_PROVIDERS)
@@ -371,35 +331,16 @@ def test_shared_rasterizer_bounds_every_convert_from_path_call() -> None:
     assert {keyword.arg for keyword in calls[0].keywords} >= {"first_page", "last_page"}
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
-        "from parse_bench.inference.providers.registry import register_provider\n"
-        "@register_provider('sample')\nclass Sample: pass\n",
-        "from parse_bench.inference.providers.registry import register_provider as register\n"
-        "@register('sample')\nclass Sample: pass\n",
-        "import parse_bench.inference.providers.registry as registry\n"
-        "@registry.register_provider('sample')\nclass Sample: pass\n",
-        "from parse_bench.inference.providers import registry as provider_registry\n"
-        "@provider_registry.register_provider('sample')\nclass Sample: pass\n",
-    ],
-)
-def test_registered_provider_discovery_resolves_import_aliases(source: str) -> None:
-    assert _registered_provider_classes(ast.parse(source)) == [("sample", "Sample")]
-
-
 def test_every_registered_parse_provider_has_explicit_pdf_classification() -> None:
-    provider_dir = Path(__file__).parents[5] / "src/parse_bench/inference/providers/parse"
-    registered: dict[str, tuple[str, str]] = {}
-
-    for source_path in provider_dir.glob("*.py"):
-        tree = ast.parse(source_path.read_text())
-        for provider_name, class_name in _registered_provider_classes(tree):
-            assert provider_name not in registered
-            registered[provider_name] = (source_path.stem, class_name)
+    registered = {
+        provider_name: (provider_class.__module__.rsplit(".", 1)[-1], provider_class.__name__)
+        for provider_name, provider_class in registered_providers().items()
+        if provider_class.__module__.startswith("parse_bench.inference.providers.parse.")
+    }
 
     classified = {spec.provider_name: spec for spec in PARSE_PROVIDER_PDF_CLASSIFICATIONS}
     assert len(classified) == len(PARSE_PROVIDER_PDF_CLASSIFICATIONS)
+    assert set(PARSE_PROVIDER_MODULES) == {spec.module_name for spec in classified.values()}
     assert set(classified) == set(registered)
     assert {
         provider_name: (spec.module_name, spec.class_name) for provider_name, spec in classified.items()
