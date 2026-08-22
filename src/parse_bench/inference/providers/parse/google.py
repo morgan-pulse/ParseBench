@@ -202,25 +202,29 @@ class GoogleProvider(Provider):
     MAX_IMAGE_DIMENSION = 8000  # pixels
     MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB (raw bytes, no base64 overhead)
 
-    def _get_pricing(self) -> tuple[float, float]:
-        """Return (input_rate, output_rate) in USD per million tokens.
+    def _get_pricing(self) -> tuple[float, float] | None:
+        """Return known (input_rate, output_rate) in USD per million tokens.
 
         Uses longest-prefix matching to avoid ambiguity when one model
         prefix is a substring of another (e.g. "gemini-2.5-flash" vs
         "gemini-2.5-flash-lite").
         """
         matches = [(p, r) for p, r in _GEMINI_PRICING_PER_M.items() if self._model.startswith(p)]
-        return max(matches, key=lambda x: len(x[0]))[1] if matches else (0.0, 0.0)
+        return max(matches, key=lambda x: len(x[0]))[1] if matches else None
 
-    def _get_context_cache_pricing(self) -> tuple[float, float]:
-        """Return (cache_hit_rate, storage_rate) in USD per million tokens."""
+    def _get_context_cache_pricing(self) -> tuple[float, float] | None:
+        """Return known (cache_hit_rate, storage_rate) in USD per million tokens."""
         matches = [(p, r) for p, r in _GEMINI_CONTEXT_CACHE_PRICING_PER_M.items() if self._model.startswith(p)]
-        return max(matches, key=lambda x: len(x[0]))[1] if matches else (0.0, 0.0)
+        return max(matches, key=lambda x: len(x[0]))[1] if matches else None
 
-    def _usage_cost_breakdown(self, usage: dict[str, int]) -> dict[str, float]:
+    def _usage_cost_breakdown(self, usage: dict[str, int]) -> dict[str, float] | None:
         """Compute cost breakdown for one Gemini API call."""
-        input_rate, output_rate = self._get_pricing()
-        cache_hit_rate, _ = self._get_context_cache_pricing()
+        pricing = self._get_pricing()
+        cache_pricing = self._get_context_cache_pricing()
+        if pricing is None or cache_pricing is None:
+            return None
+        input_rate, output_rate = pricing
+        cache_hit_rate, _ = cache_pricing
 
         input_tokens = int(usage.get("input_tokens", 0) or 0)
         cached_content_tokens = min(input_tokens, int(usage.get("cached_content_tokens", 0) or 0))
@@ -245,21 +249,23 @@ class GoogleProvider(Provider):
 
     def _billable_response_error(self, message: str, usage: dict[str, int]) -> ProviderTransientError:
         """Retain usage and cost when a billed Gemini response is unusable."""
-        return ProviderTransientError(message, attempt_stats={**usage, **self._usage_cost_breakdown(usage)})
+        stats: dict[str, int | float] = dict(usage)
+        if attempt_usages_complete([usage]):
+            breakdown = self._usage_cost_breakdown(usage)
+            if breakdown is not None:
+                stats.update(breakdown)
+        return ProviderTransientError(message, attempt_stats=stats)
 
     def _compute_usage_cost_summary(
         self,
         usages: list[dict[str, int]],
         *,
         num_pages: int,
-        cache_storage_cost_usd: float = 0.0,
+        cache_storage_cost_usd: float | None = 0.0,
     ) -> dict[str, float | int]:
         """Aggregate token and cost accounting across all Gemini calls for one document."""
         if not attempt_usages_complete(usages):
-            return {
-                "num_api_calls": len(usages),
-                "cache_storage_cost_usd": cache_storage_cost_usd,
-            }
+            return {"num_api_calls": len(usages)}
         total_input = sum(int(usage.get("input_tokens", 0) or 0) for usage in usages)
         total_tool_use_prompt = sum(int(usage.get("tool_use_prompt_tokens", 0) or 0) for usage in usages)
         total_cached_content = sum(int(usage.get("cached_content_tokens", 0) or 0) for usage in usages)
@@ -267,13 +273,27 @@ class GoogleProvider(Provider):
         total_thinking = sum(int(usage.get("thinking_tokens", 0) or 0) for usage in usages)
         total_tokens = sum(int(usage.get("total_tokens", 0) or 0) for usage in usages)
 
+        summary: dict[str, float | int] = {
+            "input_tokens": total_input,
+            "tool_use_prompt_tokens": total_tool_use_prompt,
+            "cached_content_tokens": total_cached_content,
+            "output_tokens": total_output,
+            "thinking_tokens": total_thinking,
+            "total_tokens": total_tokens,
+            "num_api_calls": len(usages),
+            "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
+            "tool_use_prompt_tokens_per_page": total_tool_use_prompt / num_pages if num_pages > 0 else 0.0,
+            "cached_content_tokens_per_page": total_cached_content / num_pages if num_pages > 0 else 0.0,
+            "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+        }
         per_call_breakdowns = [self._usage_cost_breakdown(usage) for usage in usages]
-        input_cost_usd = sum(breakdown["input_cost_usd"] for breakdown in per_call_breakdowns)
-        tool_use_prompt_cost_usd = sum(breakdown["tool_use_prompt_cost_usd"] for breakdown in per_call_breakdowns)
-        cached_input_cost_usd = sum(breakdown["cached_input_cost_usd"] for breakdown in per_call_breakdowns)
-        output_and_thinking_cost_usd = sum(
-            breakdown["output_and_thinking_cost_usd"] for breakdown in per_call_breakdowns
-        )
+        if cache_storage_cost_usd is None or any(breakdown is None for breakdown in per_call_breakdowns):
+            return summary
+        known_breakdowns = [breakdown for breakdown in per_call_breakdowns if breakdown is not None]
+        input_cost_usd = sum(breakdown["input_cost_usd"] for breakdown in known_breakdowns)
+        tool_use_prompt_cost_usd = sum(breakdown["tool_use_prompt_cost_usd"] for breakdown in known_breakdowns)
+        cached_input_cost_usd = sum(breakdown["cached_input_cost_usd"] for breakdown in known_breakdowns)
+        output_and_thinking_cost_usd = sum(breakdown["output_and_thinking_cost_usd"] for breakdown in known_breakdowns)
         cost_usd = (
             input_cost_usd
             + tool_use_prompt_cost_usd
@@ -282,26 +302,18 @@ class GoogleProvider(Provider):
             + cache_storage_cost_usd
         )
 
-        return {
-            "input_tokens": total_input,
-            "tool_use_prompt_tokens": total_tool_use_prompt,
-            "cached_content_tokens": total_cached_content,
-            "output_tokens": total_output,
-            "thinking_tokens": total_thinking,
-            "total_tokens": total_tokens,
-            "num_api_calls": len(usages),
-            "cost_usd": cost_usd,
-            "cost_per_page_usd": cost_usd / num_pages if num_pages > 0 else 0.0,
-            "input_cost_usd": input_cost_usd,
-            "tool_use_prompt_cost_usd": tool_use_prompt_cost_usd,
-            "cached_input_cost_usd": cached_input_cost_usd,
-            "output_and_thinking_cost_usd": output_and_thinking_cost_usd,
-            "cache_storage_cost_usd": cache_storage_cost_usd,
-            "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
-            "tool_use_prompt_tokens_per_page": total_tool_use_prompt / num_pages if num_pages > 0 else 0.0,
-            "cached_content_tokens_per_page": total_cached_content / num_pages if num_pages > 0 else 0.0,
-            "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
-        }
+        summary.update(
+            {
+                "cost_usd": cost_usd,
+                "cost_per_page_usd": cost_usd / num_pages if num_pages > 0 else 0.0,
+                "input_cost_usd": input_cost_usd,
+                "tool_use_prompt_cost_usd": tool_use_prompt_cost_usd,
+                "cached_input_cost_usd": cached_input_cost_usd,
+                "output_and_thinking_cost_usd": output_and_thinking_cost_usd,
+                "cache_storage_cost_usd": cache_storage_cost_usd,
+            }
+        )
+        return summary
 
     def _annotate_api_calls_with_costs(self, api_calls: list[dict[str, Any]]) -> None:
         """Populate cost fields for serialized Agentic Vision API calls."""
@@ -316,6 +328,10 @@ class GoogleProvider(Provider):
                 call.pop("cost_breakdown_usd", None)
                 continue
             breakdown = self._usage_cost_breakdown(usage)
+            if breakdown is None:
+                call.pop("cost_usd", None)
+                call.pop("cost_breakdown_usd", None)
+                continue
             call["cost_usd"] = breakdown["cost_usd"]
             call["cost_breakdown_usd"] = {
                 "input_cost_usd": breakdown["input_cost_usd"],
@@ -330,12 +346,16 @@ class GoogleProvider(Provider):
             if isinstance(stats, dict):
                 usage = {key: int(value) for key, value in stats.items() if key.endswith("tokens")}
                 if attempt_usages_complete([usage]):
-                    stats.update(self._usage_cost_breakdown(usage))
+                    breakdown = self._usage_cost_breakdown(usage)
+                    if breakdown is not None:
+                        stats.update(breakdown)
 
     def _build_agentic_vision_runner(self, expected_page_calls: int) -> GoogleAgenticVisionRunner:
         """Build the shared Agentic Vision runner for one document."""
-        input_rate, _ = self._get_pricing()
-        cache_hit_rate, storage_rate = self._get_context_cache_pricing()
+        pricing = self._get_pricing()
+        cache_pricing = self._get_context_cache_pricing()
+        input_rate = pricing[0] if pricing is not None else None
+        cache_hit_rate, storage_rate = cache_pricing if cache_pricing is not None else (None, None)
         return GoogleAgenticVisionRunner(
             client=self._client,
             types_module=self._types,
@@ -374,17 +394,17 @@ class GoogleProvider(Provider):
         """Extract token counts from a Gemini API response."""
         meta = getattr(response, "usage_metadata", None)
         if meta is None:
-            return {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0}
-        input_tok = getattr(meta, "prompt_token_count", 0) or 0
-        output_tok = getattr(meta, "candidates_token_count", 0) or 0
-        thinking_tok = getattr(meta, "thoughts_token_count", 0) or 0
-        total_tok = getattr(meta, "total_token_count", 0) or 0
-        return {
-            "input_tokens": input_tok,
-            "output_tokens": output_tok,
-            "thinking_tokens": thinking_tok,
-            "total_tokens": total_tok,
-        }
+            return {}
+        usage: dict[str, int] = {"thinking_tokens": int(getattr(meta, "thoughts_token_count", 0) or 0)}
+        for key, attribute in (
+            ("input_tokens", "prompt_token_count"),
+            ("output_tokens", "candidates_token_count"),
+            ("total_tokens", "total_token_count"),
+        ):
+            value = getattr(meta, attribute, None)
+            if value is not None:
+                usage[key] = int(value)
+        return usage
 
     def _prepare_image_for_api(self, image: Image.Image) -> Image.Image:
         """
@@ -752,6 +772,7 @@ class GoogleProvider(Provider):
         started_at = datetime.now()
         runner: GoogleAgenticVisionRunner | None = None
         result: RawInferenceResult | None = None
+        terminal_debug_payload: dict[str, Any] | None = None
 
         try:
             page_usages: list[dict[str, int]] = []
@@ -874,12 +895,30 @@ class GoogleProvider(Provider):
                         except (ProviderPermanentError, ProviderTransientError) as exc:
                             debug_payload = exc.debug_payload if isinstance(exc.debug_payload, dict) else None
                             if debug_payload is not None:
+                                terminal_debug_payload = debug_payload
                                 maybe_calls = debug_payload.get("api_calls", [])
                                 if isinstance(maybe_calls, list):
                                     failed_api_calls = [call for call in maybe_calls if isinstance(call, dict)]
                                     self._annotate_api_calls_with_costs(failed_api_calls)
                                     page_usages.extend(call.get("usage", {}) for call in failed_api_calls)
-                                    debug_payload["api_calls"] = failed_api_calls
+                                    completed_api_calls: list[dict[str, Any]] = []
+                                    for completed_page in pages:
+                                        completed_page_calls = completed_page.get("api_calls")
+                                        if isinstance(completed_page_calls, list):
+                                            completed_api_calls.extend(
+                                                call for call in completed_page_calls if isinstance(call, dict)
+                                            )
+                                    debug_payload["api_calls"] = [*completed_api_calls, *failed_api_calls]
+                                cache_info = runner.cache_info
+                                if cache_info is not None:
+                                    debug_payload["explicit_context_cache"] = {
+                                        "name": cache_info.name,
+                                        "display_name": cache_info.display_name,
+                                        "token_count": cache_info.token_count,
+                                        "ttl_seconds": cache_info.ttl_seconds,
+                                        "storage_cost_usd": cache_info.storage_cost_usd,
+                                        "created": cache_info.created,
+                                    }
                             raise
             else:
                 # Image mode (both "image" and "parse_with_layout"):
@@ -958,14 +997,11 @@ class GoogleProvider(Provider):
                     cache_storage_cost_usd=cache_storage_cost_usd,
                 )
             else:
-                self._annotate_retry_attempts_with_costs(api_attempts)
                 total_input = sum(u["input_tokens"] for u in page_usages)
                 total_output = sum(u["output_tokens"] for u in page_usages)
                 total_thinking = sum(u["thinking_tokens"] for u in page_usages)
                 total_all = sum(u["total_tokens"] for u in page_usages)
 
-                input_rate, output_rate = self._get_pricing()
-                cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
                 usage_summary = {
                     "num_api_calls": len(api_attempts) if api_attempts else len(page_usages),
                     **(
@@ -974,8 +1010,6 @@ class GoogleProvider(Provider):
                             "output_tokens": total_output,
                             "thinking_tokens": total_thinking,
                             "total_tokens": total_all,
-                            "cost_usd": cost,
-                            "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                             "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                             "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
                         }
@@ -983,6 +1017,17 @@ class GoogleProvider(Provider):
                         else {}
                     ),
                 }
+                pricing = self._get_pricing()
+                if pricing is not None and attempt_usages_complete(page_usages):
+                    input_rate, output_rate = pricing
+                    self._annotate_retry_attempts_with_costs(api_attempts)
+                    cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
+                    usage_summary.update(
+                        {
+                            "cost_usd": cost,
+                            "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                        }
+                    )
 
             raw_output = {
                 "pages": pages,
@@ -1030,6 +1075,11 @@ class GoogleProvider(Provider):
         finally:
             if runner is not None:
                 runner.delete_prefix_cache()
+                if terminal_debug_payload is not None:
+                    terminal_debug_payload["cache_error"] = runner.cache_error
+                    cache_payload = terminal_debug_payload.get("explicit_context_cache")
+                    if isinstance(cache_payload, dict):
+                        cache_payload["deleted"] = runner.cache_deleted
                 if result is not None:
                     result.raw_output["cache_error"] = runner.cache_error
                     cache_payload = result.raw_output.get("explicit_context_cache")

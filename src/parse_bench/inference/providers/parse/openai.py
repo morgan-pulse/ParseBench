@@ -166,33 +166,34 @@ class OpenAIProvider(Provider):
     # API limit is 20MB for base64 data; base64 adds ~33% overhead, so raw limit is 20MB * 3/4
     MAX_IMAGE_SIZE_BYTES = int(20 * 1024 * 1024 * 3 / 4)  # ~15 MB raw -> ~20 MB base64
 
-    def _get_pricing(self) -> tuple[float, float]:
-        """Return (input_rate, output_rate) in USD per million tokens.
+    def _get_pricing(self) -> tuple[float, float] | None:
+        """Return known (input_rate, output_rate) in USD per million tokens.
 
         Uses longest-prefix matching to avoid ambiguity when one model
         prefix is a substring of another.
         """
         matches = [(p, r) for p, r in _OPENAI_PRICING_PER_M.items() if self._model.startswith(p)]
-        return max(matches, key=lambda x: len(x[0]))[1] if matches else (0.0, 0.0)
+        return max(matches, key=lambda x: len(x[0]))[1] if matches else None
 
     @staticmethod
     def _extract_usage(response) -> dict[str, int]:  # type: ignore[no-untyped-def]
         """Extract token counts from an OpenAI API response."""
         usage = getattr(response, "usage", None)
         if usage is None:
-            return {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0}
-        input_tok = getattr(usage, "prompt_tokens", 0) or 0
-        output_tok = getattr(usage, "completion_tokens", 0) or 0
-        total_tok = getattr(usage, "total_tokens", 0) or 0
+            return {}
         # Reasoning tokens (o-series models)
         details = getattr(usage, "completion_tokens_details", None)
         thinking_tok = getattr(details, "reasoning_tokens", 0) or 0 if details else 0
-        return {
-            "input_tokens": input_tok,
-            "output_tokens": output_tok,
-            "thinking_tokens": thinking_tok,
-            "total_tokens": total_tok,
-        }
+        result = {"thinking_tokens": int(thinking_tok)}
+        for key, attribute in (
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = getattr(usage, attribute, None)
+            if value is not None:
+                result[key] = int(value)
+        return result
 
     def _prepare_image_for_api(self, image: Image.Image) -> Image.Image:
         """
@@ -688,28 +689,33 @@ class OpenAIProvider(Provider):
             total_thinking = sum(u["thinking_tokens"] for u in page_usages)
             total_all = sum(u["total_tokens"] for u in page_usages)
 
-            # Compute cost
-            input_rate, output_rate = self._get_pricing()
-            annotate_attempt_costs(
-                api_attempts,
-                input_rate_per_million=input_rate,
-                output_rate_per_million=output_rate,
-            )
-            cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
             usage_summary = (
                 {
                     "input_tokens": total_input,
                     "output_tokens": total_output,
                     "thinking_tokens": total_thinking,
                     "total_tokens": total_all,
-                    "cost_usd": cost,
-                    "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                     "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                     "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
                 }
                 if attempt_usages_complete(page_usages)
                 else {}
             )
+            pricing = self._get_pricing()
+            if pricing is not None and attempt_usages_complete(page_usages):
+                input_rate, output_rate = pricing
+                annotate_attempt_costs(
+                    api_attempts,
+                    input_rate_per_million=input_rate,
+                    output_rate_per_million=output_rate,
+                )
+                cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
+                usage_summary.update(
+                    {
+                        "cost_usd": cost,
+                        "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                    }
+                )
 
             config_info: dict[str, Any] = {
                 "dpi": self._dpi,

@@ -382,6 +382,13 @@ class InferenceRunner:
                     }
                 )
                 if attempt == MAX_RETRIES:
+                    payload = dict(error.debug_payload or {})
+                    current_attempts = payload.get("attempts")
+                    payload["attempts"] = [
+                        *failed_attempts,
+                        *(current_attempts if isinstance(current_attempts, list) else []),
+                    ]
+                    error.debug_payload = payload
                     raise
                 time.sleep(INITIAL_BACKOFF_S * (BACKOFF_MULTIPLIER**attempt))
             else:
@@ -1246,6 +1253,9 @@ class InferenceRunner:
                             "TimeoutError",
                         )
                         raw_result, normalized_result = None, None
+                except asyncio.CancelledError:
+                    await self._cancel_inflight_and_drain_async(test_case.test_id, future)
+                    raise
 
             summary.total += 1
 
@@ -1346,6 +1356,9 @@ class InferenceRunner:
                             "TimeoutError",
                         )
                         raw_result, normalized_result = None, None
+                except asyncio.CancelledError:
+                    await self._cancel_inflight_and_drain_async(example_id, future)
+                    raise
 
             summary.total += 1
 

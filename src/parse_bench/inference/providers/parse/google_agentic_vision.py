@@ -147,9 +147,9 @@ class AgenticVisionCacheInfo:
 
     name: str
     display_name: str
-    token_count: int
+    token_count: int | None
     ttl_seconds: int
-    storage_cost_usd: float
+    storage_cost_usd: float | None
     created: bool
 
 
@@ -582,9 +582,9 @@ class GoogleAgenticVisionRunner:
         enable_explicit_context_cache: bool,
         context_cache_ttl_seconds: int,
         min_cacheable_tokens: int,
-        input_cost_per_million: float,
-        cache_hit_cost_per_million: float,
-        cache_storage_cost_per_million_token_hour: float,
+        input_cost_per_million: float | None,
+        cache_hit_cost_per_million: float | None,
+        cache_storage_cost_per_million_token_hour: float | None,
         expected_page_calls: int,
     ) -> None:
         self._client = client
@@ -673,12 +673,14 @@ class GoogleAgenticVisionRunner:
             self._cache_error = str(exc)
             return None
 
-        token_count = int(getattr(getattr(cache, "usage_metadata", None), "total_token_count", 0) or 0)
+        usage_metadata = getattr(cache, "usage_metadata", None)
+        raw_token_count = getattr(usage_metadata, "total_token_count", None)
+        token_count = int(raw_token_count) if raw_token_count is not None else None
         ttl_hours = self._context_cache_ttl_seconds / 3600.0
         storage_cost_usd = (
             token_count * self._cache_storage_cost_per_million_token_hour * ttl_hours / 1_000_000
-            if token_count > 0
-            else 0.0
+            if token_count is not None and self._cache_storage_cost_per_million_token_hour is not None
+            else None
         )
         self._cache_info = AgenticVisionCacheInfo(
             name=str(getattr(cache, "name", "")),
@@ -823,7 +825,6 @@ class GoogleAgenticVisionRunner:
                 "response_parts": response_parts,
                 "usage": usage,
                 "final_text": final_text,
-                "cost_usd": 0.0,
             }
             api_calls.append(call_record)
 
@@ -864,22 +865,20 @@ def extract_usage_from_response(response: Any) -> dict[str, int]:
     """Extract all usage buckets relevant to Agentic Vision accounting."""
     meta = getattr(response, "usage_metadata", None)
     if meta is None:
-        return {
-            "input_tokens": 0,
-            "tool_use_prompt_tokens": 0,
-            "cached_content_tokens": 0,
-            "output_tokens": 0,
-            "thinking_tokens": 0,
-            "total_tokens": 0,
-        }
-    return {
-        "input_tokens": int(getattr(meta, "prompt_token_count", 0) or 0),
-        "tool_use_prompt_tokens": int(getattr(meta, "tool_use_prompt_token_count", 0) or 0),
-        "cached_content_tokens": int(getattr(meta, "cached_content_token_count", 0) or 0),
-        "output_tokens": int(getattr(meta, "candidates_token_count", 0) or 0),
-        "thinking_tokens": int(getattr(meta, "thoughts_token_count", 0) or 0),
-        "total_tokens": int(getattr(meta, "total_token_count", 0) or 0),
-    }
+        return {}
+    usage: dict[str, int] = {}
+    for key, attribute in (
+        ("input_tokens", "prompt_token_count"),
+        ("tool_use_prompt_tokens", "tool_use_prompt_token_count"),
+        ("cached_content_tokens", "cached_content_token_count"),
+        ("output_tokens", "candidates_token_count"),
+        ("thinking_tokens", "thoughts_token_count"),
+        ("total_tokens", "total_token_count"),
+    ):
+        value = getattr(meta, attribute, None)
+        if value is not None:
+            usage[key] = int(value)
+    return usage
 
 
 def classify_gemini_api_exception(exc: Exception) -> Exception:

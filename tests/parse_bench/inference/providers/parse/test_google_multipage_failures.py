@@ -261,12 +261,13 @@ def test_google_agentic_page_two_malformed_then_transient_exhausts_one_page_budg
     debug_payload = exc_info.value.debug_payload
     assert isinstance(debug_payload, dict)
     calls = debug_payload["api_calls"]
-    assert [call["page_index"] for call in calls] == [1, 1, 1]
-    assert [call["attempt"] for call in calls] == [1, 2, 3]
-    assert [call["usage"].get("total_tokens") for call in calls] == [11, None, 13]
+    assert [call["page_index"] for call in calls] == [0, 1, 1, 1]
+    assert [call["attempt"] for call in calls] == [1, 1, 2, 3]
+    assert [call["usage"].get("total_tokens") for call in calls] == [None, 11, None, 13]
     assert calls[0]["response"] is not None
-    assert calls[1]["error"]["type"] == "ProviderTransientError"
-    assert calls[2]["response"] is not None
+    assert calls[1]["response"] is not None
+    assert calls[2]["error"]["type"] == "ProviderTransientError"
+    assert calls[3]["response"] is not None
     for image in rendered:
         with pytest.raises(ValueError, match="Operation on closed image"):
             image.getpixel((0, 0))

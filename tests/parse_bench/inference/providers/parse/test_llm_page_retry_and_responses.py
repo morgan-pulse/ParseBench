@@ -13,6 +13,7 @@ from parse_bench.inference.providers.base import (
     ProviderRetryExhaustedError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse.google_agentic_vision import extract_usage_from_response
 from parse_bench.inference.runner import InferenceRunner
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -59,6 +60,7 @@ def _layout_file_provider(module_name: str, class_name: str) -> Any:
     provider._supports_temperature = True
     provider._enable_explicit_context_cache = False
     provider._get_pricing = lambda: (0.0, 0.0)
+    provider._get_context_cache_pricing = lambda: (0.0, 0.0)
     return provider
 
 
@@ -181,6 +183,102 @@ def _anthropic_response(content: list[object] | None = None) -> SimpleNamespace:
         content=content if content is not None else [SimpleNamespace(type="text", text="page")],
         usage=None,
     )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "response"),
+    [
+        ("google", "GoogleProvider", SimpleNamespace(usage_metadata=None)),
+        ("openai", "OpenAIProvider", SimpleNamespace(usage=None)),
+        ("anthropic", "AnthropicProvider", SimpleNamespace(usage=None)),
+        ("amazon_nova", "AmazonNovaProvider", {}),
+    ],
+)
+def test_missing_success_usage_remains_unknown(module_name: str, class_name: str, response: object) -> None:
+    provider_class = getattr(
+        importlib.import_module(f"parse_bench.inference.providers.parse.{module_name}"), class_name
+    )
+
+    assert provider_class._extract_usage(response) == {}
+
+
+def test_agentic_missing_or_partial_success_usage_remains_incomplete() -> None:
+    assert extract_usage_from_response(SimpleNamespace(usage_metadata=None)) == {}
+    partial = extract_usage_from_response(SimpleNamespace(usage_metadata=SimpleNamespace(prompt_token_count=7)))
+
+    assert partial == {"input_tokens": 7}
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    [
+        ("google", "GoogleProvider"),
+        ("openai", "OpenAIProvider"),
+        ("anthropic", "AnthropicProvider"),
+        ("amazon_nova", "AmazonNovaProvider"),
+    ],
+)
+def test_unknown_model_pricing_remains_unknown(module_name: str, class_name: str) -> None:
+    provider = object.__new__(
+        getattr(importlib.import_module(f"parse_bench.inference.providers.parse.{module_name}"), class_name)
+    )
+    provider._model = "future-unknown-model"
+
+    assert provider._get_pricing() is None
+
+
+def test_google_unknown_pricing_preserves_complete_usage_without_cost() -> None:
+    google = importlib.import_module("parse_bench.inference.providers.parse.google")
+    provider = object.__new__(google.GoogleProvider)
+    provider._model = "future-unknown-model"
+
+    summary = provider._compute_usage_cost_summary([dict(_USAGE)], num_pages=1)
+
+    assert summary == {
+        "input_tokens": 1,
+        "tool_use_prompt_tokens": 0,
+        "cached_content_tokens": 0,
+        "output_tokens": 1,
+        "thinking_tokens": 0,
+        "total_tokens": 2,
+        "num_api_calls": 1,
+        "input_tokens_per_page": 1.0,
+        "tool_use_prompt_tokens_per_page": 0.0,
+        "cached_content_tokens_per_page": 0.0,
+        "output_tokens_per_page": 1.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    [
+        ("google", "GoogleProvider"),
+        ("openai", "OpenAIProvider"),
+        ("anthropic", "AnthropicProvider"),
+    ],
+)
+def test_unknown_pricing_does_not_abort_completed_file_inference(
+    module_name: str,
+    class_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    module = importlib.import_module(f"parse_bench.inference.providers.parse.{module_name}")
+    monkeypatch.setattr(module, "split_pdf_to_pages", lambda path: [(b"1", 10, 10)])
+    provider = _layout_file_provider(module_name, class_name)
+    provider._get_pricing = lambda: None
+    if module_name == "google":
+        provider._get_context_cache_pricing = lambda: None
+    provider._parse_pdf_page_with_layout = lambda pdf_bytes: ([], "[]", dict(_USAGE))
+
+    result = provider.run_inference(_pipeline(module_name), _request(source))
+
+    assert result.raw_output["num_api_calls"] == 1
+    assert result.raw_output["total_tokens"] == 2
+    assert "cost_usd" not in result.raw_output
+    assert "cost_per_page_usd" not in result.raw_output
 
 
 @pytest.mark.parametrize(

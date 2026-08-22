@@ -247,6 +247,51 @@ def test_async_timeout_adopts_late_success_without_resubmission(tmp_path: Path) 
     assert run_summary.total_latency_ms == 9
 
 
+def test_external_cancellation_signals_and_drains_running_worker(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    cancel_calls: list[str] = []
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace(cancel=lambda example_id: (cancel_calls.append(example_id), release.set()))
+    runner.use_rich = False
+    runner.job_statuses = {}
+    runner.timeout_retries = 0
+    runner.per_file_timeout = 60
+    runner._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    runner._is_already_processed = lambda example_id: False
+
+    def process(pdf_path: Path, example_id: str, product_type: ProductType) -> tuple[None, None, None]:
+        started.set()
+        release.wait()
+        return None, None, None
+
+    runner._process_document = process
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            runner._process_with_semaphore(
+                asyncio.Semaphore(1),
+                tmp_path / "document.pdf",
+                "document",
+                ProductType.PARSE,
+                RunSummary(),
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        runner._thread_pool.shutdown(wait=True)
+
+    assert cancel_calls == ["document"]
+    assert release.is_set()
+
+
 @pytest.mark.parametrize("provider_name", ["google", "openai", "anthropic"])
 def test_runner_file_retry_accounts_failed_usage_cost_and_success(
     provider_name: str,
@@ -317,6 +362,33 @@ def test_runner_file_retry_accounts_failed_usage_cost_and_success(
     attempts = result.raw_output["api_attempts"]
     assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
     assert attempts[0]["stats"]["cost_usd"] == pytest.approx(9 / 1_000_000)
+
+
+def test_runner_terminal_retry_persists_every_failed_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request = _request(tmp_path / "document.pdf")
+
+    class FileProvider:
+        def _get_pricing(self) -> tuple[float, float]:
+            return 1.0, 2.0
+
+        def run_inference(self, pipeline: PipelineSpec, current_request: InferenceRequest) -> RawInferenceResult:
+            raise ProviderTransientError(
+                "unavailable",
+                attempt_stats={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+    runner = object.__new__(InferenceRunner)
+    runner.provider = FileProvider()
+    runner.pipeline = _pipeline()
+    monkeypatch.setattr("parse_bench.inference.runner.time.sleep", lambda delay: None)
+
+    with pytest.raises(ProviderTransientError) as exc_info:
+        runner._run_inference_with_retries(request)
+
+    payload = exc_info.value.debug_payload
+    assert isinstance(payload, dict)
+    assert len(payload["attempts"]) == 6
+    assert [attempt["runner_attempt"] for attempt in payload["attempts"]] == [1, 2, 3, 4, 5, 6]
 
 
 def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, monkeypatch) -> None:

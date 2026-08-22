@@ -221,8 +221,8 @@ class AnthropicProvider(Provider):
     # API limit is 5MB for base64 data; base64 adds ~33% overhead, so raw limit is 5MB * 3/4
     MAX_IMAGE_SIZE_BYTES = int(5 * 1024 * 1024 * 3 / 4)  # ~3.75 MB raw -> ~5 MB base64
 
-    def _get_pricing(self) -> tuple[float, float]:
-        """Return (input_rate, output_rate) in USD per million tokens.
+    def _get_pricing(self) -> tuple[float, float] | None:
+        """Return known (input_rate, output_rate) in USD per million tokens.
 
         Uses longest-prefix matching to avoid ambiguity when one model
         prefix is a substring of another.
@@ -231,7 +231,7 @@ class AnthropicProvider(Provider):
             return (2.00, 10.00)
 
         matches = [(p, r) for p, r in _ANTHROPIC_PRICING_PER_M.items() if self._model.startswith(p)]
-        return max(matches, key=lambda x: len(x[0]))[1] if matches else (0.0, 0.0)
+        return max(matches, key=lambda x: len(x[0]))[1] if matches else None
 
     @staticmethod
     def _extract_text(response) -> str:  # type: ignore[no-untyped-def]
@@ -262,9 +262,9 @@ class AnthropicProvider(Provider):
         """Extract token counts from an Anthropic API response."""
         usage = getattr(response, "usage", None)
         if usage is None:
-            return {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0}
-        input_tok = getattr(usage, "input_tokens", 0) or 0
-        output_tok = getattr(usage, "output_tokens", 0) or 0
+            return {}
+        input_value = getattr(usage, "input_tokens", None)
+        output_value = getattr(usage, "output_tokens", None)
         # With extended thinking, output_tokens includes thinking tokens.
         # Try to count thinking tokens from content blocks for reporting.
         thinking_tok = 0
@@ -272,13 +272,14 @@ class AnthropicProvider(Provider):
             if getattr(block, "type", None) == "thinking":
                 # Token count not directly available; use output_tokens as-is.
                 break
-        total_tok = input_tok + output_tok
-        return {
-            "input_tokens": input_tok,
-            "output_tokens": output_tok,
-            "thinking_tokens": thinking_tok,
-            "total_tokens": total_tok,
-        }
+        result = {"thinking_tokens": thinking_tok}
+        if input_value is not None:
+            result["input_tokens"] = int(input_value)
+        if output_value is not None:
+            result["output_tokens"] = int(output_value)
+        if input_value is not None and output_value is not None:
+            result["total_tokens"] = int(input_value) + int(output_value)
+        return result
 
     def _resize_to_perceived_size(self, image: Image.Image) -> Image.Image:
         """Pre-resize so the image Claude perceives is the image we recorded.
@@ -803,28 +804,33 @@ class AnthropicProvider(Provider):
             total_thinking = sum(u["thinking_tokens"] for u in page_usages)
             total_all = sum(u["total_tokens"] for u in page_usages)
 
-            # Compute cost
-            input_rate, output_rate = self._get_pricing()
-            annotate_attempt_costs(
-                api_attempts,
-                input_rate_per_million=input_rate,
-                output_rate_per_million=output_rate,
-            )
-            cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
             usage_summary = (
                 {
                     "input_tokens": total_input,
                     "output_tokens": total_output,
                     "thinking_tokens": total_thinking,
                     "total_tokens": total_all,
-                    "cost_usd": cost,
-                    "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                     "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                     "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
                 }
                 if attempt_usages_complete(page_usages)
                 else {}
             )
+            pricing = self._get_pricing()
+            if pricing is not None and attempt_usages_complete(page_usages):
+                input_rate, output_rate = pricing
+                annotate_attempt_costs(
+                    api_attempts,
+                    input_rate_per_million=input_rate,
+                    output_rate_per_million=output_rate,
+                )
+                cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
+                usage_summary.update(
+                    {
+                        "cost_usd": cost,
+                        "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                    }
+                )
 
             raw_output = {
                 "pages": pages,

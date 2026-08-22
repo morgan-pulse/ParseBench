@@ -51,6 +51,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -69,7 +70,12 @@ from parse_bench.inference.providers.base import (
     ProviderRetryExhaustedError,
     ProviderTransientError,
 )
-from parse_bench.inference.providers.parse._multipage_image import PageImages, close_derived_images
+from parse_bench.inference.providers.parse._multipage_image import (
+    PageImages,
+    annotate_attempt_costs,
+    attempt_usages_complete,
+    close_derived_images,
+)
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import (
     LayoutItemIR,
@@ -2602,13 +2608,20 @@ def _nano_payload(stage: str, model: str, image: Image.Image) -> dict:
     return payload
 
 
+@dataclass(frozen=True)
+class _NanoStageResponse:
+    content: str
+    usage: dict[str, int]
+
+
 async def _nano_chat(
     client: httpx.AsyncClient,
     url: str,
     payload: dict,
     semaphore: asyncio.Semaphore,
-) -> str:
+) -> _NanoStageResponse:
     """POST one stage request and classify failures for the page retry owner."""
+    usage: dict[str, int] = {}
     async with semaphore:
         try:
             resp = await client.post(
@@ -2620,12 +2633,30 @@ async def _nano_chat(
             if resp.status_code >= 400:
                 raise ProviderPermanentError(f"Stage request rejected with HTTP {resp.status_code}: {resp.text[:200]}")
             data = resp.json()
+            raw_usage = data.get("usage")
+            if isinstance(raw_usage, dict):
+                for key, source_key in (
+                    ("input_tokens", "prompt_tokens"),
+                    ("output_tokens", "completion_tokens"),
+                    ("total_tokens", "total_tokens"),
+                ):
+                    value = raw_usage.get(source_key)
+                    if value is not None:
+                        usage[key] = int(value)
+                details = raw_usage.get("completion_tokens_details")
+                if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+                    usage["thinking_tokens"] = int(details["reasoning_tokens"])
             content = data["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("stage response contained no text content")
-            return content
+            return _NanoStageResponse(content=content, usage=usage)
+        except ProviderPermanentError:
+            raise
         except (httpx.HTTPError, TimeoutError, IndexError, KeyError, TypeError, ValueError) as exc:
-            raise ProviderTransientError(f"Stage request failed: {exc}") from exc
+            raise ProviderTransientError(
+                f"Stage request failed: {exc}",
+                attempt_stats=usage or None,
+            ) from exc
 
 
 def _nano_group_by_bucket(
@@ -2896,14 +2927,26 @@ def _nano_assemble_markdown(
 class _NanoEngine:
     """Per-document pipeline against one OpenAI-compatible vLLM endpoint."""
 
-    def __init__(self, endpoint_url: str, model: str, max_concurrent: int, timeout_s: float):
+    def __init__(
+        self,
+        endpoint_url: str,
+        model: str,
+        max_concurrent: int,
+        timeout_s: float,
+        input_cost_per_million: float | None = None,
+        output_cost_per_million: float | None = None,
+    ):
         base = endpoint_url.rstrip("/")
         self._url = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
         self._model = model
         self._max_concurrent = max_concurrent
         self._timeout_s = timeout_s
+        self._input_cost_per_million = input_cost_per_million
+        self._output_cost_per_million = output_cost_per_million
+        self._api_attempts: list[dict[str, object]] = []
 
     async def parse_pages(self, page_images: Iterable[Image.Image]) -> dict:
+        self._api_attempts = []
         semaphore = asyncio.Semaphore(self._max_concurrent)
         elements: list[dict[str, Any]] = []
         page_numbers: list[int] = []
@@ -2935,11 +2978,36 @@ class _NanoEngine:
                     "layout_order": el.get("layout_order", 0),
                 }
             )
-        return {
+        raw_output = {
             "markdown": full_md,
             "markdown_pages": markdown_pages,
             "pages": [{"page_number": n, "elements": els} for n, els in sorted(pages_payload.items())],
+            "model": self._model,
+            "num_api_calls": len(self._api_attempts),
+            "api_attempts": self._api_attempts,
         }
+        attempt_usages = [
+            cast(dict[str, int], attempt["stats"])
+            for attempt in self._api_attempts
+            if isinstance(attempt.get("stats"), dict)
+        ]
+        if attempt_usages_complete(attempt_usages):
+            for field in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
+                raw_output[field] = sum(int(usage.get(field, 0)) for usage in attempt_usages)
+            if self._input_cost_per_million is not None and self._output_cost_per_million is not None:
+                annotate_attempt_costs(
+                    self._api_attempts,
+                    input_rate_per_million=self._input_cost_per_million,
+                    output_rate_per_million=self._output_cost_per_million,
+                )
+                cost_usd = sum(
+                    float(stats["cost_usd"])
+                    for attempt in self._api_attempts
+                    if isinstance((stats := attempt.get("stats")), dict) and "cost_usd" in stats
+                )
+                raw_output["cost_usd"] = cost_usd
+                raw_output["cost_per_page_usd"] = cost_usd / len(page_numbers) if page_numbers else 0.0
+        return raw_output
 
     async def _parse_page(
         self,
@@ -2957,24 +3025,80 @@ class _NanoEngine:
                 track,
             )
 
-    async def _run_stage_with_retries[T](
+    def _annotate_attempt_cost(self, record: dict[str, object]) -> None:
+        """Attach cost when this endpoint has explicit pricing and usage is known."""
+        if self._input_cost_per_million is None or self._output_cost_per_million is None:
+            return
+        annotate_attempt_costs(
+            [record],
+            input_rate_per_million=self._input_cost_per_million,
+            output_rate_per_million=self._output_cost_per_million,
+        )
+
+    async def _run_stage_with_retries(
         self,
-        call: Callable[[], Awaitable[T]],
+        call: Callable[[], Awaitable[str | _NanoStageResponse]],
         *,
         page_no: int,
         stage: str,
-    ) -> T:
+    ) -> str:
         """Retry one physical KDL stage without replaying completed siblings."""
         max_attempts = 3
         for attempt in range(max_attempts):
+            record: dict[str, object] = {
+                "call_index": len(self._api_attempts) + 1,
+                "page_number": page_no,
+                "stage": stage,
+                "attempt": attempt + 1,
+                "status": "running",
+                "stats": {},
+            }
+            self._api_attempts.append(record)
             try:
-                return await call()
+                result = await call()
+            except asyncio.CancelledError:
+                record["status"] = "cancelled"
+                raise
+            except ProviderPermanentError as exc:
+                record.update(
+                    {
+                        "status": "failed",
+                        "stats": dict(exc.attempt_stats or {}),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                self._annotate_attempt_cost(record)
+                payload = dict(exc.debug_payload or {})
+                payload["attempts"] = self._api_attempts
+                exc.debug_payload = payload
+                raise
             except ProviderTransientError as exc:
+                record.update(
+                    {
+                        "status": "failed",
+                        "stats": dict(exc.attempt_stats or {}),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                self._annotate_attempt_cost(record)
                 if attempt == max_attempts - 1:
                     raise ProviderRetryExhaustedError(
-                        f"KDL page {page_no} failed after {max_attempts} attempts during {stage}: {exc}"
+                        f"KDL page {page_no} failed after {max_attempts} attempts during {stage}: {exc}",
+                        debug_payload={"attempts": self._api_attempts},
                     ) from exc
                 await asyncio.sleep(2.0 * (2**attempt))
+            else:
+                if isinstance(result, _NanoStageResponse):
+                    content = result.content
+                    stats = result.usage
+                else:
+                    content = result
+                    stats = {}
+                record.update({"status": "succeeded", "stats": stats})
+                self._annotate_attempt_cost(record)
+                return content
         raise AssertionError("unreachable")
 
     async def _parse_page_with_owned_images(
@@ -3122,6 +3246,17 @@ class KdlFrontierNanoProvider(Provider):
         self._timeout = float(self.base_config.get("timeout", 900))
         self._max_pages = int(self.base_config.get("max_pages", os.getenv("KDL_NANO_MAX_PAGES", "400")))
         self._max_concurrent = int(os.getenv("KDL_NANO_MAX_CONCURRENT", "8"))
+        input_cost = self.base_config.get("input_cost_per_million")
+        output_cost = self.base_config.get("output_cost_per_million")
+        if (input_cost is None) != (output_cost is None):
+            raise ProviderConfigError("KDL pricing requires both input_cost_per_million and output_cost_per_million")
+        self._input_cost_per_million = float(input_cost) if input_cost is not None else None
+        self._output_cost_per_million = float(output_cost) if output_cost is not None else None
+        if any(
+            rate is not None and (not math.isfinite(rate) or rate < 0)
+            for rate in (self._input_cost_per_million, self._output_cost_per_million)
+        ):
+            raise ProviderConfigError("KDL pricing rates must be finite non-negative numbers")
 
     @contextmanager
     def _open_page_images(self, source_path: Path) -> Iterator[PageImages]:
@@ -3176,7 +3311,14 @@ class KdlFrontierNanoProvider(Provider):
         if not source_path.exists():
             raise ProviderPermanentError(f"Source file not found: {source_path}")
         started_at = datetime.now()
-        engine = _NanoEngine(self._endpoint_url, self._model, self._max_concurrent, self._timeout)
+        engine = _NanoEngine(
+            self._endpoint_url,
+            self._model,
+            self._max_concurrent,
+            self._timeout,
+            self._input_cost_per_million,
+            self._output_cost_per_million,
+        )
         try:
             with self._open_page_images(source_path) as page_images:
                 raw_output = self.run_async_from_sync(engine.parse_pages(page_images))

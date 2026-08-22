@@ -50,6 +50,8 @@ def _provider() -> kdl.KdlFrontierNanoProvider:
     provider._max_concurrent = 1
     provider._timeout = 30
     provider._max_pages = 10
+    provider._input_cost_per_million = None
+    provider._output_cost_per_million = None
     return provider
 
 
@@ -266,6 +268,69 @@ def test_nano_chat_retries_invalid_responses_and_preserves_last_failure(
     assert isinstance(caught.value.__cause__, IndexError)
 
 
+def test_kdl_persists_every_stage_attempt_and_known_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _content_image()
+    monkeypatch.setattr(kdl, "analyze_page_content", lambda image: SimpleNamespace(is_blank=False))
+    layout = "<|box_start|>100 100 900 900<|box_end|><|ref_start|>text<|ref_end|>"
+    responses = [
+        {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 0, "total_tokens": 2}},
+        {
+            "choices": [{"message": {"content": layout}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        },
+        {
+            "choices": [{"message": {"content": "recognized text"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+        },
+    ]
+
+    class Client:
+        async def post(self, url: str, **kwargs: object) -> httpx.Response:
+            request = httpx.Request("POST", url)
+            return httpx.Response(200, request=request, json=responses.pop(0))
+
+    class ClientContext:
+        async def __aenter__(self) -> Client:
+            return Client()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(kdl.httpx, "AsyncClient", lambda **kwargs: ClientContext())
+    monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
+    engine = kdl._NanoEngine(
+        "http://provider.invalid",
+        "test-model",
+        1,
+        30,
+        input_cost_per_million=1.0,
+        output_cost_per_million=2.0,
+    )
+
+    result = asyncio.run(engine.parse_pages([page]))
+
+    assert result["num_api_calls"] == 3
+    assert [(attempt["stage"], attempt["attempt"], attempt["status"]) for attempt in result["api_attempts"]] == [
+        ("layout", 1, "failed"),
+        ("layout", 2, "succeeded"),
+        ("text recognition", 1, "succeeded"),
+    ]
+    assert result["input_tokens"] == 10
+    assert result["output_tokens"] == 10
+    assert result["total_tokens"] == 20
+    assert [attempt["stats"]["cost_usd"] for attempt in result["api_attempts"]] == pytest.approx(
+        [2 / 1_000_000, 11 / 1_000_000, 17 / 1_000_000]
+    )
+    assert result["cost_usd"] == pytest.approx(30 / 1_000_000)
+    assert result["cost_per_page_usd"] == pytest.approx(30 / 1_000_000)
+    page.close()
+
+
 @pytest.mark.parametrize("fail_recognition", [False, True], ids=["monochromatic-skip", "gather-failure"])
 def test_kdl_real_page_stage_closes_every_derivative(
     fail_recognition: bool,
@@ -365,10 +430,18 @@ def test_kdl_exhausted_page_two_retry_is_terminal_without_replaying_page_one(
     monkeypatch.setattr(kdl.asyncio, "sleep", no_sleep)
     engine = kdl._NanoEngine("http://provider.invalid", "test-model", 1, 30)
 
-    with pytest.raises(ProviderRetryExhaustedError, match="KDL page 2 failed after 3 attempts"):
+    with pytest.raises(ProviderRetryExhaustedError, match="KDL page 2 failed after 3 attempts") as caught:
         asyncio.run(engine.parse_pages(pages))
 
     assert calls == 5
+    attempts = caught.value.debug_payload["attempts"]
+    assert [(attempt["page_number"], attempt["status"]) for attempt in attempts] == [
+        (1, "succeeded"),
+        (1, "succeeded"),
+        (2, "failed"),
+        (2, "failed"),
+        (2, "failed"),
+    ]
     for page in pages:
         page.close()
 

@@ -196,10 +196,10 @@ class AmazonNovaProvider(Provider):
                 return self._model[len(prefix) :]
         return self._model
 
-    def _get_pricing(self) -> tuple[float, float]:
-        """Return (input_rate, output_rate) in USD per million tokens."""
+    def _get_pricing(self) -> tuple[float, float] | None:
+        """Return known (input_rate, output_rate) in USD per million tokens."""
         table = _NOVA_GLOBAL_PRICING_PER_M if self._model.startswith("global.") else _NOVA_PRICING_PER_M
-        return table.get(self._base_model_id(), (0.0, 0.0))
+        return table.get(self._base_model_id())
 
     def _raise_bedrock_error(self, e: Exception) -> NoReturn:
         """Classify a Bedrock/botocore exception as transient, rate-limited or permanent."""
@@ -227,16 +227,20 @@ class AmazonNovaProvider(Provider):
         separately, so ``thinking_tokens`` is always 0 — the spend is already
         inside ``output_tokens``.
         """
-        usage = response.get("usage") or {}
-        input_tok = int(usage.get("inputTokens", 0) or 0)
-        output_tok = int(usage.get("outputTokens", 0) or 0)
-        total_tok = int(usage.get("totalTokens", 0) or 0) or (input_tok + output_tok)
-        return {
-            "input_tokens": input_tok,
-            "output_tokens": output_tok,
-            "thinking_tokens": 0,
-            "total_tokens": total_tok,
-        }
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        result = {"thinking_tokens": 0}
+        for key, source_key in (("input_tokens", "inputTokens"), ("output_tokens", "outputTokens")):
+            value = usage.get(source_key)
+            if value is not None:
+                result[key] = int(value)
+        total_value = usage.get("totalTokens")
+        if total_value is not None:
+            result["total_tokens"] = int(total_value)
+        elif "input_tokens" in result and "output_tokens" in result:
+            result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+        return result
 
     @staticmethod
     def _extract_text(response: dict[str, Any]) -> str:
@@ -424,27 +428,33 @@ class AmazonNovaProvider(Provider):
             total_thinking = sum(u["thinking_tokens"] for u in page_usages)
             total_all = sum(u["total_tokens"] for u in page_usages)
 
-            input_rate, output_rate = self._get_pricing()
-            annotate_attempt_costs(
-                api_attempts,
-                input_rate_per_million=input_rate,
-                output_rate_per_million=output_rate,
-            )
-            cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
             usage_summary = (
                 {
                     "input_tokens": total_input,
                     "output_tokens": total_output,
                     "thinking_tokens": total_thinking,
                     "total_tokens": total_all,
-                    "cost_usd": cost,
-                    "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
                     "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
                     "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
                 }
                 if attempt_usages_complete(page_usages)
                 else {}
             )
+            pricing = self._get_pricing()
+            if pricing is not None and attempt_usages_complete(page_usages):
+                input_rate, output_rate = pricing
+                annotate_attempt_costs(
+                    api_attempts,
+                    input_rate_per_million=input_rate,
+                    output_rate_per_million=output_rate,
+                )
+                cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
+                usage_summary.update(
+                    {
+                        "cost_usd": cost,
+                        "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                    }
+                )
 
             config_info: dict[str, Any] = {
                 "dpi": self._dpi,

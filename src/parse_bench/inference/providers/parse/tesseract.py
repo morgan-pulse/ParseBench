@@ -11,6 +11,7 @@ from parse_bench.inference.providers.base import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from parse_bench.inference.providers.parse._layout_utils import validated_sorted_page_records
 from parse_bench.inference.providers.parse._multipage_image import (
     open_document_page_images,
     run_page_with_retries,
@@ -284,8 +285,8 @@ class TesseractProvider(Provider):
         pages: list[PageIR] = []
         page_texts = []
 
-        for page_data in raw_result.raw_output.get("pages", []):
-            page_index = page_data.get("page_index", 0)
+        for page_data in validated_sorted_page_records(raw_result.raw_output.get("pages")):
+            page_index = page_data["page_index"]
             text = page_data.get("text", "")
 
             pages.append(PageIR(page_index=page_index, markdown=text))

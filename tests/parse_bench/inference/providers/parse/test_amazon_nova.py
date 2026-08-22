@@ -73,8 +73,35 @@ def test_global_profile_is_priced_at_the_cross_region_global_rate() -> None:
     assert _provider(_model="global.amazon.nova-2-lite-v1:0")._get_pricing() == (0.30, 2.50)
 
 
-def test_unknown_model_falls_back_to_zero_pricing() -> None:
-    assert _provider(_model="us.amazon.nova-9-mystery-v1:0")._get_pricing() == (0.0, 0.0)
+def test_unknown_model_pricing_remains_unknown() -> None:
+    assert _provider(_model="us.amazon.nova-9-mystery-v1:0")._get_pricing() is None
+
+
+def test_unknown_pricing_does_not_abort_completed_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 1})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (10, 20), "white")],
+    )
+    provider = _provider(_model="us.amazon.nova-9-mystery-v1:0")
+    provider._parse_image_with_layout = lambda image: (
+        [],
+        "[]",
+        {"input_tokens": 1, "output_tokens": 1, "thinking_tokens": 0, "total_tokens": 2},
+        "end_turn",
+    )
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert result.raw_output["num_api_calls"] == 1
+    assert result.raw_output["total_tokens"] == 2
+    assert "cost_usd" not in result.raw_output
+    assert "cost_per_page_usd" not in result.raw_output
 
 
 def test_constructor_disables_botocore_retries_and_uses_declared_dpi(

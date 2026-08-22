@@ -119,6 +119,8 @@ def _provider(module_name: str, class_name: str, dpi: int) -> Any:
         setattr(provider, name, value)
     if module_name in {"amazon_nova", "anthropic", "google", "openai"}:
         provider._get_pricing = lambda: (1.0, 2.0)
+    if module_name == "google":
+        provider._get_context_cache_pricing = lambda: (0.0, 0.0)
     if module_name == "textract":
         provider._textract_client = _TextractClient()
 
