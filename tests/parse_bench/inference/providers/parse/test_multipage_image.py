@@ -4,8 +4,10 @@ import asyncio
 import concurrent.futures
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -21,7 +23,7 @@ from parse_bench.inference.providers.parse._multipage_image import (
     open_document_page_images,
     run_pdf_pages,
 )
-from parse_bench.inference.runner import InferenceRunner
+from parse_bench.inference.runner import InferenceRunner, RunSummary
 from parse_bench.schemas.parse_output import ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, RawInferenceResult
@@ -51,21 +53,27 @@ def test_timeout_drain_blocks_resubmission_until_running_worker_terminates() -> 
     release = threading.Event()
     drain_returned = threading.Event()
 
-    def worker() -> None:
+    def worker() -> str:
         started.set()
         release.wait()
+        return "late-success"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(worker)
         assert started.wait(timeout=1)
-        drain_thread = threading.Thread(
-            target=lambda: (runner._cancel_inflight_and_drain("document", future), drain_returned.set())
-        )
+        outcomes: list[object] = []
+
+        def drain() -> None:
+            outcomes.append(runner._cancel_inflight_and_drain("document", future))
+            drain_returned.set()
+
+        drain_thread = threading.Thread(target=drain)
         drain_thread.start()
         assert not drain_returned.wait(timeout=0.05)
         release.set()
         drain_thread.join(timeout=1)
         assert drain_returned.is_set()
+        assert outcomes == ["late-success"]
 
 
 def test_async_timeout_drain_awaits_running_worker_termination() -> None:
@@ -74,9 +82,10 @@ def test_async_timeout_drain_awaits_running_worker_termination() -> None:
     started = threading.Event()
     release = threading.Event()
 
-    def worker() -> None:
+    def worker() -> str:
         started.set()
         release.wait()
+        return "late-success"
 
     async def exercise(future: concurrent.futures.Future[None]) -> None:
         with pytest.raises(TimeoutError):
@@ -85,12 +94,162 @@ def test_async_timeout_drain_awaits_running_worker_termination() -> None:
         await asyncio.sleep(0.05)
         assert not drain.done()
         release.set()
-        await asyncio.wait_for(drain, timeout=1)
+        assert await asyncio.wait_for(drain, timeout=1) == "late-success"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(worker)
         assert started.wait(timeout=1)
         asyncio.run(exercise(future))
+
+
+def test_sync_timeout_adopts_late_success_without_resubmission(tmp_path: Path) -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace()
+    runner.pipeline = _pipeline()
+    runner.output_dir = tmp_path
+    runner.use_rich = False
+    runner.console = None
+    runner.job_statuses = {}
+    runner.timeout_retries = 2
+    runner.per_file_timeout = 0.01
+    runner.max_concurrent = 1
+    runner.save_raw = True
+    runner.save_normalized = True
+    runner.force = True
+    runner.tags = []
+    runner._is_already_processed = lambda example_id: False
+    calls = 0
+    late_raw = SimpleNamespace(latency_in_ms=7)
+
+    def process(test_case: object, product_type: ProductType) -> tuple[object, None, None]:
+        nonlocal calls
+        calls += 1
+        time.sleep(0.03)
+        return late_raw, None, None
+
+    runner._process_test_case = process
+    test_case = SimpleNamespace(test_id="document", file_path=tmp_path / "document.pdf")
+
+    summary = runner._run_test_cases_sync([test_case], ProductType.PARSE)
+
+    assert calls == 1
+    assert summary.successful == 1
+    assert summary.failed == 0
+    assert summary.total_latency_ms == 7
+
+
+def test_async_timeout_adopts_late_success_without_resubmission(tmp_path: Path) -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace()
+    runner.use_rich = False
+    runner.job_statuses = {}
+    runner.timeout_retries = 2
+    runner.per_file_timeout = 0.01
+    runner._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    runner._is_already_processed = lambda example_id: False
+    calls = 0
+    late_raw = SimpleNamespace(latency_in_ms=9)
+
+    def process(pdf_path: Path, example_id: str, product_type: ProductType) -> tuple[object, None, None]:
+        nonlocal calls
+        calls += 1
+        time.sleep(0.03)
+        return late_raw, None, None
+
+    runner._process_document = process
+
+    async def exercise() -> RunSummary:
+        run_summary = RunSummary()
+        await runner._process_with_semaphore(
+            asyncio.Semaphore(1),
+            tmp_path / "document.pdf",
+            "document",
+            ProductType.PARSE,
+            run_summary,
+        )
+        return run_summary
+
+    try:
+        run_summary = asyncio.run(exercise())
+    finally:
+        runner._thread_pool.shutdown(wait=True)
+
+    assert calls == 1
+    assert run_summary.successful == 1
+    assert run_summary.failed == 0
+    assert run_summary.total_latency_ms == 9
+
+
+@pytest.mark.parametrize("provider_name", ["google", "openai", "anthropic"])
+def test_runner_file_retry_accounts_failed_usage_cost_and_success(
+    provider_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path / "document.pdf")
+    calls = 0
+
+    class FileProvider:
+        def _get_pricing(self) -> tuple[float, float]:
+            return 1.0, 2.0
+
+        def run_inference(self, pipeline: PipelineSpec, current_request: InferenceRequest) -> RawInferenceResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ProviderTransientError(
+                    "malformed billed file response",
+                    attempt_stats={
+                        "input_tokens": 5,
+                        "output_tokens": 2,
+                        "thinking_tokens": 0,
+                        "total_tokens": 7,
+                    },
+                )
+            now = datetime.now()
+            return RawInferenceResult(
+                request=current_request,
+                pipeline=pipeline,
+                pipeline_name=pipeline.pipeline_name,
+                product_type=current_request.product_type,
+                raw_output={
+                    "pages": [{"page_index": 0, "markdown": "success"}],
+                    "num_pages": 1,
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "thinking_tokens": 0,
+                    "total_tokens": 14,
+                    "cost_usd": 18 / 1_000_000,
+                    "cost_per_page_usd": 18 / 1_000_000,
+                    "num_api_calls": 1,
+                    "api_attempts": [],
+                },
+                started_at=now,
+                completed_at=now,
+                latency_in_ms=1,
+            )
+
+    runner = object.__new__(InferenceRunner)
+    runner.provider = FileProvider()
+    runner.pipeline = PipelineSpec(
+        pipeline_name=f"{provider_name}_file",
+        provider_name=provider_name,
+        product_type=ProductType.PARSE,
+    )
+    monkeypatch.setattr("parse_bench.inference.runner.time.sleep", lambda delay: None)
+
+    result = runner._run_inference_with_retries(request)
+
+    assert calls == 2
+    assert result.raw_output["num_api_calls"] == 2
+    assert result.raw_output["input_tokens"] == 15
+    assert result.raw_output["output_tokens"] == 6
+    assert result.raw_output["total_tokens"] == 21
+    assert result.raw_output["cost_usd"] == pytest.approx(27 / 1_000_000)
+    assert result.raw_output["cost_per_page_usd"] == pytest.approx(27 / 1_000_000)
+    attempts = result.raw_output["api_attempts"]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
+    assert attempts[0]["stats"]["cost_usd"] == pytest.approx(9 / 1_000_000)
 
 
 def test_pdf_pages_are_processed_and_combined_in_document_order(tmp_path: Path, monkeypatch) -> None:

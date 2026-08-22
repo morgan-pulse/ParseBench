@@ -414,6 +414,35 @@ def test_textract_page_retry_budget_is_exactly_three_billable_calls(
     assert delays == [2.0, 4.0]
 
 
+def test_textract_success_persists_every_physical_retry_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 1})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (8, 8), "white")],
+    )
+    provider = _provider("textract", "TextractProvider", 300)
+    provider._textract_client = _TextractClient(
+        failure=ProviderTransientError("first call unavailable"),
+        fail_on_call=1,
+    )
+    monkeypatch.setattr("time.sleep", lambda delay: None)
+
+    result = provider.run_inference(_pipeline("textract"), _request(source))
+
+    assert provider._textract_client.calls == 2
+    assert result.raw_output["num_api_calls"] == 2
+    attempts = result.raw_output["api_attempts"]
+    assert [(attempt["page_number"], attempt["attempt"], attempt["status"]) for attempt in attempts] == [
+        (1, 1, "failed"),
+        (1, 2, "succeeded"),
+    ]
+
+
 def test_dots_ocr_malformed_layout_aborts_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "document.pdf"
     source.touch()

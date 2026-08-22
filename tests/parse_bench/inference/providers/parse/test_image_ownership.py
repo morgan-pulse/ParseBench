@@ -108,6 +108,9 @@ def test_textract_closes_all_resizes_but_not_caller_image(fail: bool, monkeypatc
     real_save = Image.Image.save
 
     def resize(image: Image.Image, *args: Any, **kwargs: Any) -> Image.Image:
+        if len(derived) >= 2:
+            previous = derived[-1]
+            assert isinstance(previous.close, Mock) and previous.close.call_count == 1
         resized = real_resize(image, *args, **kwargs)
         resized.close = Mock(wraps=resized.close)
         derived.append(resized)

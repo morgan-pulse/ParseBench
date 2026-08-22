@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -48,6 +49,29 @@ from parse_bench.test_cases.schema import TestCase
 MAX_RETRIES = 5
 INITIAL_BACKOFF_S = 2.0  # seconds
 BACKOFF_MULTIPLIER = 2.0  # exponential backoff factor
+
+_RETRY_ADDITIVE_FIELDS = (
+    "credits_used",
+    "cost_usd",
+    "input_cost_usd",
+    "tool_use_prompt_cost_usd",
+    "cached_input_cost_usd",
+    "output_and_thinking_cost_usd",
+    "cache_storage_cost_usd",
+    "input_tokens",
+    "tool_use_prompt_tokens",
+    "cached_content_tokens",
+    "output_tokens",
+    "total_tokens",
+    "thinking_tokens",
+)
+_RETRY_PER_PAGE_FIELDS = {
+    "cost_per_page_usd": "cost_usd",
+    "input_tokens_per_page": "input_tokens",
+    "tool_use_prompt_tokens_per_page": "tool_use_prompt_tokens",
+    "cached_content_tokens_per_page": "cached_content_tokens",
+    "output_tokens_per_page": "output_tokens",
+}
 
 # Per-file timeout and retry configuration
 DEFAULT_PER_FILE_TIMEOUT_S = 600.0  # 10 minutes per file
@@ -237,25 +261,129 @@ class InferenceRunner:
         self,
         example_id: str,
         future: concurrent.futures.Future[Any],
-    ) -> None:
-        """Cancel cooperatively and wait until no prior worker can overlap a retry."""
+    ) -> Any | None:
+        """Cancel cooperatively, drain the worker, and preserve a late outcome."""
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
-            future.result()
-        except (concurrent.futures.CancelledError, Exception):
-            pass
+            return future.result()
+        except Exception:
+            return None
 
     async def _cancel_inflight_and_drain_async(
         self,
         example_id: str,
         future: concurrent.futures.Future[Any],
-    ) -> None:
-        """Cancel cooperatively and await termination before any async retry."""
+    ) -> Any | None:
+        """Cancel cooperatively, await termination, and preserve a late outcome."""
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
-            await asyncio.shield(asyncio.wrap_future(future))
+            return await asyncio.shield(asyncio.wrap_future(future))
         except (concurrent.futures.CancelledError, asyncio.CancelledError, Exception):
-            pass
+            return None
+
+    @staticmethod
+    def _is_finite_number(value: object) -> TypeGuard[int | float]:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    def _attempt_stats_with_cost(self, error: ProviderError) -> dict[str, int | float]:
+        """Return public stats for one failed physical call, deriving model cost."""
+        stats = {key: value for key, value in dict(error.attempt_stats or {}).items() if self._is_finite_number(value)}
+        if "cost_usd" in stats:
+            return stats
+
+        pricing = getattr(self.provider, "_get_pricing", None)
+        if not callable(pricing):
+            return stats
+        try:
+            input_rate, output_rate = pricing()
+        except Exception:  # pragma: no cover - provider-specific defensive path
+            return stats
+        input_tokens = stats.get("input_tokens")
+        output_tokens = stats.get("output_tokens")
+        thinking_tokens = stats.get("thinking_tokens", 0)
+        if not self._is_finite_number(input_rate) or not self._is_finite_number(output_rate):
+            return stats
+        if not self._is_finite_number(input_tokens) or not self._is_finite_number(output_tokens):
+            return stats
+        if not self._is_finite_number(thinking_tokens):
+            return stats
+        stats["cost_usd"] = (input_tokens * input_rate + (output_tokens + thinking_tokens) * output_rate) / 1_000_000
+        return stats
+
+    def _merge_retry_attempts(
+        self,
+        raw_result: RawInferenceResult,
+        failed_attempts: list[dict[str, object]],
+    ) -> None:
+        """Merge runner-owned failures into the successful provider result."""
+        if not failed_attempts:
+            return
+
+        raw_output = raw_result.raw_output
+        existing = raw_output.get("api_attempts")
+        successful_attempts = (
+            [dict(attempt) for attempt in existing if isinstance(attempt, dict)] if isinstance(existing, list) else []
+        )
+        successful_call_count = raw_output.get("num_api_calls")
+        if not self._is_finite_number(successful_call_count):
+            successful_call_count = len(successful_attempts) or 1
+        if not successful_attempts:
+            successful_attempts = [
+                {
+                    "runner_attempt": len(failed_attempts) + 1,
+                    "status": "succeeded",
+                    "stats": {
+                        field: raw_output[field]
+                        for field in _RETRY_ADDITIVE_FIELDS
+                        if self._is_finite_number(raw_output.get(field))
+                    },
+                }
+            ]
+
+        failed_stats = [attempt["stats"] for attempt in failed_attempts]
+        for stat_field in _RETRY_ADDITIVE_FIELDS:
+            current = raw_output.get(stat_field)
+            prior_values = [stats.get(stat_field) if isinstance(stats, dict) else None for stats in failed_stats]
+            if self._is_finite_number(current) and all(self._is_finite_number(value) for value in prior_values):
+                raw_output[stat_field] = current + sum(prior_values)  # type: ignore[arg-type,operator]
+            elif stat_field in raw_output:
+                # A partial total is more misleading than an explicit omission.
+                del raw_output[stat_field]
+
+        raw_output["num_api_calls"] = len(failed_attempts) + int(successful_call_count)
+        raw_output["api_attempts"] = [*failed_attempts, *successful_attempts]
+
+        num_pages = raw_output.get("num_pages")
+        for per_page_field, total_field in _RETRY_PER_PAGE_FIELDS.items():
+            total = raw_output.get(total_field)
+            if self._is_finite_number(total) and self._is_finite_number(num_pages) and num_pages > 0:
+                raw_output[per_page_field] = total / num_pages
+            else:
+                raw_output.pop(per_page_field, None)
+
+    def _run_inference_with_retries(self, request: InferenceRequest) -> RawInferenceResult:
+        """Run a document provider and account every runner-owned API attempt."""
+        failed_attempts: list[dict[str, object]] = []
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                raw_result = self.provider.run_inference(self.pipeline, request)
+            except (ProviderTransientError, ProviderRateLimitError) as error:
+                failed_attempts.append(
+                    {
+                        "runner_attempt": attempt + 1,
+                        "status": "failed",
+                        "stats": self._attempt_stats_with_cost(error),
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
+                if attempt == MAX_RETRIES:
+                    raise
+                time.sleep(INITIAL_BACKOFF_S * (BACKOFF_MULTIPLIER**attempt))
+            else:
+                self._merge_retry_attempts(raw_result, failed_attempts)
+                return raw_result
+        raise AssertionError("unreachable")
 
     def _is_already_processed(self, example_id: str) -> bool:
         """Check if a file has already been processed."""
@@ -581,21 +709,7 @@ class InferenceRunner:
                 product_type=product_type,
             )
 
-            # Run inference with retry for transient / rate-limit errors
-            last_error: Exception | None = None
-            for attempt in range(MAX_RETRIES + 1):
-                try:
-                    raw_result = self.provider.run_inference(self.pipeline, request)
-                    break
-                except (ProviderTransientError, ProviderRateLimitError) as e:
-                    last_error = e
-                    if attempt < MAX_RETRIES:
-                        backoff = INITIAL_BACKOFF_S * (BACKOFF_MULTIPLIER**attempt)
-                        time.sleep(backoff)
-                    else:
-                        raise
-            else:
-                raise last_error  # type: ignore[misc]
+            raw_result = self._run_inference_with_retries(request)
 
             # Fetch parse jobLogs + extract token usage BEFORE normalize, so that
             # token fields land in the InferenceResult that evaluation reads.
@@ -675,21 +789,7 @@ class InferenceRunner:
                 config_override=getattr(test_case, "config", None),
             )
 
-            # Run inference with retry for transient / rate-limit errors
-            last_error: Exception | None = None
-            for attempt in range(MAX_RETRIES + 1):
-                try:
-                    raw_result = self.provider.run_inference(self.pipeline, request)
-                    break
-                except (ProviderTransientError, ProviderRateLimitError) as e:
-                    last_error = e
-                    if attempt < MAX_RETRIES:
-                        backoff = INITIAL_BACKOFF_S * (BACKOFF_MULTIPLIER**attempt)
-                        time.sleep(backoff)
-                    else:
-                        raise
-            else:
-                raise last_error  # type: ignore[misc]
+            raw_result = self._run_inference_with_retries(request)
 
             # Fetch parse jobLogs + extract token usage BEFORE normalize, so that
             # token fields land in the InferenceResult that evaluation reads.
@@ -971,7 +1071,10 @@ class InferenceRunner:
                     raw_result, normalized_result, error_info = future.result(timeout=self.per_file_timeout)
                     break  # Success (or handled provider error) - exit retry loop
                 except concurrent.futures.TimeoutError:
-                    self._cancel_inflight_and_drain(test_case.test_id, future)
+                    drained_outcome = self._cancel_inflight_and_drain(test_case.test_id, future)
+                    if drained_outcome is not None:
+                        raw_result, normalized_result, error_info = drained_outcome
+                        break
                     remaining = self.timeout_retries - timeout_attempt
                     if remaining > 0:
                         print(
@@ -1111,7 +1214,10 @@ class InferenceRunner:
                     )
                     break  # Success (or handled provider error) - exit retry loop
                 except TimeoutError:
-                    await self._cancel_inflight_and_drain_async(test_case.test_id, future)
+                    drained_outcome = await self._cancel_inflight_and_drain_async(test_case.test_id, future)
+                    if drained_outcome is not None:
+                        raw_result, normalized_result, error_info = drained_outcome
+                        break
                     remaining = self.timeout_retries - timeout_attempt
                     if remaining > 0:
                         print(
@@ -1211,7 +1317,10 @@ class InferenceRunner:
                     )
                     break  # Success (or handled provider error) - exit retry loop
                 except TimeoutError:
-                    await self._cancel_inflight_and_drain_async(example_id, future)
+                    drained_outcome = await self._cancel_inflight_and_drain_async(example_id, future)
+                    if drained_outcome is not None:
+                        raw_result, normalized_result, error_info = drained_outcome
+                        break
                     remaining = self.timeout_retries - timeout_attempt
                     if remaining > 0:
                         print(f"  Timeout after {self.per_file_timeout}s for {example_id}, retrying ({remaining} left)")

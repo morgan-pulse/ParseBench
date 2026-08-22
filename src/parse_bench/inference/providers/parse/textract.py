@@ -1,7 +1,6 @@
 """Provider for AWS Textract document parsing."""
 
 import os
-from contextlib import ExitStack
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -11,6 +10,7 @@ from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
     ProviderPermanentError,
+    ProviderRetryExhaustedError,
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
@@ -132,42 +132,52 @@ class TextractProvider(Provider):
 
         from PIL import Image
 
-        with ExitStack() as derived_images:
-            original = image
-
+        original = image
+        base = image
+        candidate = None
+        try:
             # Step 1: Resize if dimensions exceed limit
-            width, height = image.size
+            width, height = base.size
             if width > self._MAX_DIMENSION or height > self._MAX_DIMENSION:
                 scale = min(self._MAX_DIMENSION / width, self._MAX_DIMENSION / height)
                 new_width = int(width * scale)
                 new_height = int(height * scale)
-                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                if image is not original:
-                    derived_images.callback(image.close)
+                base = base.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
             # Step 2: Try PNG first
             img_buffer = io.BytesIO()
-            image.save(img_buffer, format="PNG", optimize=True)
+            base.save(img_buffer, format="PNG", optimize=True)
             img_bytes = img_buffer.getvalue()
 
             # Step 3: If still too large, progressively reduce size
             scale = 0.9
             while len(img_bytes) > self._TARGET_BYTES and scale > 0.3:
-                new_width = int(image.size[0] * scale)
-                new_height = int(image.size[1] * scale)
-                resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                if resized is not original:
-                    derived_images.callback(resized.close)
+                if candidate is not None:
+                    candidate.close()
+                    candidate = None
+                new_width = int(base.size[0] * scale)
+                new_height = int(base.size[1] * scale)
+                resized = base.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                try:
+                    img_buffer = io.BytesIO()
+                    resized.save(img_buffer, format="PNG", optimize=True)
+                    img_bytes = img_buffer.getvalue()
+                except Exception:
+                    resized.close()
+                    raise
 
-                img_buffer = io.BytesIO()
-                resized.save(img_buffer, format="PNG", optimize=True)
-                img_bytes = img_buffer.getvalue()
+                candidate = resized
 
                 if len(img_bytes) <= self._TARGET_BYTES:
                     break
                 scale *= 0.9
 
             return img_bytes
+        finally:
+            if candidate is not None:
+                candidate.close()
+            if base is not original:
+                base.close()
 
     def _analyze_document(self, file_path: str) -> dict[str, Any]:
         """
@@ -231,7 +241,7 @@ class TextractProvider(Provider):
         except Exception as e:
             raise ProviderTransientError(f"Unexpected error calling Textract: {e}") from e
 
-    def _analyze_multipage_document(self, file_path: str) -> dict[str, Any]:
+    def _analyze_multipage_document(self, file_path: str) -> tuple[dict[str, Any], list[dict[str, object]]]:
         """
         Analyze a multi-page document using AWS Textract async API.
 
@@ -247,9 +257,17 @@ class TextractProvider(Provider):
 
         # For images, use direct synchronous API
         if suffix in {".png", ".jpg", ".jpeg", ".tiff", ".tif"}:
-            return self._analyze_document(file_path)
+            direct_attempts: list[dict[str, object]] = []
+            response = run_page_with_retries(
+                partial(self._analyze_document, file_path),
+                provider_name="textract",
+                page_number=1,
+                attempt_ledger=direct_attempts,
+            )
+            return response, direct_attempts
 
         all_blocks: list[dict[str, Any]] = []
+        api_attempts: list[dict[str, object]] = []
         current_page = 0
 
         def analyze_page(img_bytes: bytes, feature_types: list[str]) -> dict[str, Any]:
@@ -290,21 +308,33 @@ class TextractProvider(Provider):
                 if self._detect_forms:
                     feature_types.append("FORMS")
 
-                response = run_page_with_retries(
-                    partial(analyze_page, img_bytes, feature_types),
-                    provider_name="textract",
-                    page_number=page_num + 1,
-                )
+                attempts: list[dict[str, object]] = []
+                try:
+                    response = run_page_with_retries(
+                        partial(analyze_page, img_bytes, feature_types),
+                        provider_name="textract",
+                        page_number=page_num + 1,
+                        attempt_ledger=attempts,
+                    )
+                except ProviderRetryExhaustedError as error:
+                    payload = dict(error.debug_payload or {})
+                    payload["attempts"] = [*api_attempts, *attempts]
+                    error.debug_payload = payload
+                    raise
+                api_attempts.extend(attempts)
                 for block in response.get("Blocks", []):
                     block["Page"] = page_num + 1
                     all_blocks.append(block)
 
                 current_page = page_num + 1
 
-        return {
-            "Blocks": all_blocks,
-            "DocumentMetadata": {"Pages": current_page},
-        }
+        return (
+            {
+                "Blocks": all_blocks,
+                "DocumentMetadata": {"Pages": current_page},
+            },
+            api_attempts,
+        )
 
     def _convert_to_markdown(self, textract_response: dict[str, Any]) -> dict[str, Any]:
         """
@@ -454,7 +484,7 @@ class TextractProvider(Provider):
 
         try:
             # Analyze the document
-            textract_response = self._analyze_multipage_document(str(source_path))
+            textract_response, api_attempts = self._analyze_multipage_document(str(source_path))
 
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)
@@ -466,6 +496,8 @@ class TextractProvider(Provider):
                 product_type=request.product_type,
                 raw_output={
                     "textract_response": textract_response,
+                    "num_api_calls": len(api_attempts),
+                    "api_attempts": api_attempts,
                     "config": {
                         "output_tables_as_html": self._output_tables_as_html,
                         "detect_tables": self._detect_tables,
