@@ -27,6 +27,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
 )
 from parse_bench.inference.providers.parse._multipage_image import (
     append_attempt_usages,
+    attempt_usages_complete,
     close_derived_images,
     open_document_page_images,
     run_page_with_retries,
@@ -254,6 +255,11 @@ class GoogleProvider(Provider):
         cache_storage_cost_usd: float = 0.0,
     ) -> dict[str, float | int]:
         """Aggregate token and cost accounting across all Gemini calls for one document."""
+        if not attempt_usages_complete(usages):
+            return {
+                "num_api_calls": len(usages),
+                "cache_storage_cost_usd": cache_storage_cost_usd,
+            }
         total_input = sum(int(usage.get("input_tokens", 0) or 0) for usage in usages)
         total_tool_use_prompt = sum(int(usage.get("tool_use_prompt_tokens", 0) or 0) for usage in usages)
         total_cached_content = sum(int(usage.get("cached_content_tokens", 0) or 0) for usage in usages)
@@ -305,6 +311,10 @@ class GoogleProvider(Provider):
             usage = call.get("usage", {})
             if not isinstance(usage, dict):
                 usage = {}
+            if not attempt_usages_complete([usage]):
+                call.pop("cost_usd", None)
+                call.pop("cost_breakdown_usd", None)
+                continue
             breakdown = self._usage_cost_breakdown(usage)
             call["cost_usd"] = breakdown["cost_usd"]
             call["cost_breakdown_usd"] = {
@@ -319,7 +329,8 @@ class GoogleProvider(Provider):
             stats = attempt.get("stats")
             if isinstance(stats, dict):
                 usage = {key: int(value) for key, value in stats.items() if key.endswith("tokens")}
-                stats.update(self._usage_cost_breakdown(usage))
+                if attempt_usages_complete([usage]):
+                    stats.update(self._usage_cost_breakdown(usage))
 
     def _build_agentic_vision_runner(self, expected_page_calls: int) -> GoogleAgenticVisionRunner:
         """Build the shared Agentic Vision runner for one document."""
@@ -788,6 +799,7 @@ class GoogleProvider(Provider):
                             provider_name=pipeline.provider_name,
                             page_number=page_index + 1,
                             attempt_ledger=attempts,
+                            prior_attempt_ledger=api_attempts,
                         )
                         api_attempts.extend(attempts)
                         append_attempt_usages(page_usages, attempts)
@@ -882,6 +894,7 @@ class GoogleProvider(Provider):
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
                                 attempt_ledger=attempts,
+                                prior_attempt_ledger=api_attempts,
                             )
                             api_attempts.extend(attempts)
                             append_attempt_usages(page_usages, attempts)
@@ -901,6 +914,7 @@ class GoogleProvider(Provider):
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
                                 attempt_ledger=attempts,
+                                prior_attempt_ledger=api_attempts,
                             )
                             api_attempts.extend(attempts)
                             append_attempt_usages(page_usages, attempts)
@@ -953,15 +967,21 @@ class GoogleProvider(Provider):
                 input_rate, output_rate = self._get_pricing()
                 cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
                 usage_summary = {
-                    "input_tokens": total_input,
-                    "output_tokens": total_output,
-                    "thinking_tokens": total_thinking,
-                    "total_tokens": total_all,
-                    "cost_usd": cost,
-                    "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
-                    "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
-                    "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
                     "num_api_calls": len(api_attempts) if api_attempts else len(page_usages),
+                    **(
+                        {
+                            "input_tokens": total_input,
+                            "output_tokens": total_output,
+                            "thinking_tokens": total_thinking,
+                            "total_tokens": total_all,
+                            "cost_usd": cost,
+                            "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                            "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
+                            "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                        }
+                        if attempt_usages_complete(page_usages)
+                        else {}
+                    ),
                 }
 
             raw_output = {

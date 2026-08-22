@@ -3242,6 +3242,7 @@ class KdlFrontierNanoProvider(Provider):
         if (
             source_page_numbers != sorted(source_page_numbers)
             or len(source_page_numbers) != len(set(source_page_numbers))
+            or source_page_numbers != list(range(1, len(source_page_numbers) + 1))
             or set(markdown_by_page) != set(source_page_numbers)
             or len(markdown_by_page) != len(md_pages)
         ):
@@ -3254,7 +3255,13 @@ class KdlFrontierNanoProvider(Provider):
             )
             for source_page_number in source_page_numbers
         ]
-        full_markdown = raw.get("markdown") or "\n\n<!-- page-break -->\n\n".join(p.markdown for p in pages)
+        markdown_parts: list[str] = []
+        for index, page in enumerate(pages):
+            if index:
+                markdown_parts.append(f"---\n\n**Page {page.page_index + 1}**")
+            if page.markdown:
+                markdown_parts.append(page.markdown)
+        full_markdown = "\n\n".join(markdown_parts)
 
         layout_pages: list[ParseLayoutPageIR] = []
         for p in raw_pages:

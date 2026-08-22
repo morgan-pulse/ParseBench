@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -97,6 +98,9 @@ def test_layout_file_page_two_retry_never_replays_page_one(
     assert raw_result.raw_output["num_pages"] == 2
     assert raw_result.raw_output["num_api_calls"] == 3
     assert len(raw_result.raw_output["api_attempts"]) == 3
+    assert "total_tokens" not in raw_result.raw_output
+    assert "cost_usd" not in raw_result.raw_output
+    assert "page_usages" not in raw_result.raw_output
     assert calls == [1, 2, 2]
 
 
@@ -140,6 +144,7 @@ def test_layout_file_exhaustion_is_terminal_to_document_runner(
 
     provider.run_inference = counted_run_inference
     runner = object.__new__(InferenceRunner)
+    runner.output_dir = tmp_path
     runner.use_rich = False
     runner.job_statuses = {}
     runner.pipeline = _pipeline(module_name)
@@ -155,6 +160,13 @@ def test_layout_file_exhaustion_is_terminal_to_document_runner(
     assert error is not None and error[2] == ProviderRetryExhaustedError.__name__
     assert document_attempts == 1
     assert calls == [1, 2, 2, 2]
+    payload = json.loads((tmp_path / "document.error.raw.json").read_text())
+    assert [(attempt["page_number"], attempt["status"]) for attempt in payload["attempts"]] == [
+        (1, "succeeded"),
+        (2, "failed"),
+        (2, "failed"),
+        (2, "failed"),
+    ]
 
 
 def _openai_response(content: object = "page") -> SimpleNamespace:

@@ -271,7 +271,7 @@ class TextractProvider(Provider):
         current_page = 0
 
         def analyze_page(img_bytes: bytes, feature_types: list[str]) -> dict[str, Any]:
-            from botocore.exceptions import ClientError
+            from botocore.exceptions import BotoCoreError, ClientError
 
             try:
                 if feature_types:
@@ -295,6 +295,8 @@ class TextractProvider(Provider):
                 if error_code in ("InvalidParameterException", "UnsupportedDocumentException"):
                     raise ProviderPermanentError(f"Invalid document: {error_message}") from exc
                 raise ProviderTransientError(f"AWS Textract error: {error_message}") from exc
+            except BotoCoreError as exc:
+                raise ProviderTransientError(f"AWS Textract transport error: {exc}") from exc
 
         with open_document_page_images(path, dpi=self.PDF_RENDER_DPI) as images:
             for page_num, image in enumerate(images):
@@ -399,7 +401,7 @@ class TextractProvider(Provider):
             )
 
         # Build full document markdown
-        full_markdown = "\n\n".join(page["markdown"] for page in pages_data if page["markdown"])  # type: ignore[misc]
+        full_markdown = "\n\n".join(page["markdown"] for page in pages_data)  # type: ignore[misc]
 
         return {
             "pages": pages_data,
@@ -548,7 +550,7 @@ class TextractProvider(Provider):
 
         # Build layout_pages for layout cross-evaluation
         blocks = textract_response.get("Blocks", [])
-        layout_pages = _build_layout_pages(blocks)
+        layout_pages = _build_layout_pages(blocks, num_pages=markdown_result.get("num_pages", 0))
 
         output = ParseOutput(
             task_type="parse",
@@ -571,7 +573,7 @@ class TextractProvider(Provider):
         )
 
 
-def _build_layout_pages(blocks: list[dict[str, Any]]) -> list[ParseLayoutPageIR]:
+def _build_layout_pages(blocks: list[dict[str, Any]], *, num_pages: int | None = None) -> list[ParseLayoutPageIR]:
     """Build layout_pages from Textract LAYOUT_* blocks for layout cross-evaluation.
 
     Groups LAYOUT_* blocks by page and converts each block's normalized [0,1]
@@ -594,6 +596,13 @@ def _build_layout_pages(blocks: list[dict[str, Any]]) -> list[ParseLayoutPageIR]
         if block_type in TEXTRACT_LABEL_MAP:
             page_num = block.get("Page", 1)
             pages_blocks[page_num].append(block)
+
+    if num_pages is None:
+        num_pages = max(pages_blocks, default=0)
+    if not isinstance(num_pages, int) or isinstance(num_pages, bool) or num_pages < 0:
+        raise ProviderPermanentError("Textract page count must be a non-negative integer")
+    for page_num in range(1, num_pages + 1):
+        pages_blocks.setdefault(page_num, [])
 
     layout_pages: list[ParseLayoutPageIR] = []
     for page_num in sorted(pages_blocks.keys()):

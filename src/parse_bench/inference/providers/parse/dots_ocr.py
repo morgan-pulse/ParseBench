@@ -314,6 +314,7 @@ class DotsOcrParseProvider(Provider):
         image: Image.Image,
         page_number: int,
         attempt_ledger: list[dict[str, object]],
+        prior_attempt_ledger: list[dict[str, object]],
     ) -> str:
         """Own transient retries at the billable page request boundary."""
         return run_page_with_retries(
@@ -321,6 +322,7 @@ class DotsOcrParseProvider(Provider):
             provider_name="dots.ocr",
             page_number=page_number,
             attempt_ledger=attempt_ledger,
+            prior_attempt_ledger=prior_attempt_ledger,
         )
 
     def _run_inference_pages(self, source_path: Path) -> dict[str, Any]:
@@ -332,7 +334,12 @@ class DotsOcrParseProvider(Provider):
                 page_image = image if image.mode in ("RGB", "RGBA") else image.convert("RGB")
                 try:
                     attempts: list[dict[str, object]] = []
-                    raw_text = self._call_page_with_retries(page_image, page_index + 1, attempts)
+                    raw_text = self._call_page_with_retries(
+                        page_image,
+                        page_index + 1,
+                        attempts,
+                        api_attempts,
+                    )
                     api_attempts.extend(attempts)
 
                     page_data: dict[str, Any] = {

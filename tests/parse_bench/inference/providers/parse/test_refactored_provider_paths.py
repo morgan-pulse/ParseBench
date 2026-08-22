@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +14,7 @@ from parse_bench.inference.providers.base import (
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
-from parse_bench.inference.providers.parse.textract import TextractProvider
+from parse_bench.inference.providers.parse.textract import TextractProvider, _build_layout_pages
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -441,6 +442,75 @@ def test_textract_success_persists_every_physical_retry_attempt(
         (1, 1, "failed"),
         (1, 2, "succeeded"),
     ]
+
+
+def test_textract_retries_botocore_transport_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from botocore.exceptions import EndpointConnectionError
+
+    source = tmp_path / "document.pdf"
+    source.touch()
+    _mock_pdf(source, monkeypatch)
+    provider = _provider("textract", "TextractProvider", 300)
+    provider._textract_client = _TextractClient(
+        failure=EndpointConnectionError(endpoint_url="https://textract.invalid"),
+        fail_on_call=1,
+    )
+    monkeypatch.setattr("time.sleep", lambda delay: None)
+
+    result = provider.run_inference(_pipeline("textract"), _request(source))
+
+    assert provider._textract_client.calls == 3
+    assert result.raw_output["num_api_calls"] == 3
+    assert [
+        (attempt["page_number"], attempt["attempt"], attempt["status"]) for attempt in result.raw_output["api_attempts"]
+    ] == [
+        (1, 1, "failed"),
+        (1, 2, "succeeded"),
+        (2, 1, "succeeded"),
+    ]
+
+
+def test_textract_preserves_blank_physical_pages_in_all_normalized_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider("textract", "TextractProvider", 300)
+    provider._detect_tables = False
+    fake_pages = [
+        SimpleNamespace(
+            page_num=1,
+            lines=[SimpleNamespace(text="one", bbox=SimpleNamespace(y=0.1))],
+            tables=[],
+        ),
+        SimpleNamespace(
+            page_num=3,
+            lines=[SimpleNamespace(text="three", bbox=SimpleNamespace(y=0.1))],
+            tables=[],
+        ),
+    ]
+    monkeypatch.setattr(
+        "textractor.parsers.response_parser.parse",
+        lambda response: SimpleNamespace(pages=fake_pages),
+    )
+    blocks = [
+        {"Id": "p1", "BlockType": "LAYOUT_TEXT", "Page": 1},
+        {"Id": "p3", "BlockType": "LAYOUT_TEXT", "Page": 3},
+    ]
+    response = {"DocumentMetadata": {"Pages": 3}, "Blocks": blocks}
+
+    markdown = TextractProvider._convert_to_markdown(provider, response)
+    layout_pages = _build_layout_pages(blocks, num_pages=3)
+
+    assert [(page["page_index"], page["markdown"]) for page in markdown["pages"]] == [
+        (0, "one"),
+        (1, ""),
+        (2, "three"),
+    ]
+    assert markdown["markdown"] == "one\n\n\n\nthree"
+    assert [page.page_number for page in layout_pages] == [1, 2, 3]
+    assert layout_pages[1].items == []
 
 
 def test_dots_ocr_malformed_layout_aborts_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -244,6 +244,43 @@ def test_pdf_run_inference_renders_and_calls_bedrock_one_page_at_a_time(
         rendered_pages[-1].getpixel((0, 0))
 
 
+def test_failed_attempt_without_usage_omits_precise_document_totals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    monkeypatch.setattr("pdf2image.pdfinfo_from_path", lambda path: {"Pages": 1})
+    monkeypatch.setattr(
+        "pdf2image.convert_from_path",
+        lambda path, dpi, first_page, last_page: [Image.new("RGB", (10, 20), "white")],
+    )
+    monkeypatch.setattr("parse_bench.inference.providers.parse._multipage_image.time.sleep", lambda delay: None)
+    provider = _provider()
+    calls = 0
+
+    def parse_page(image: Image.Image) -> tuple[list[dict[str, object]], str, dict[str, int], str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProviderTransientError("transport failed before usage was reported")
+        return (
+            [{"bbox": [0, 0, 10, 10], "label": "Text", "text": "page"}],
+            '<div data-bbox="[0,0,10,10]" data-label="Text">page</div>',
+            {"input_tokens": 2, "output_tokens": 1, "thinking_tokens": 0, "total_tokens": 3},
+            "end_turn",
+        )
+
+    provider._parse_image_with_layout = parse_page
+
+    result = provider.run_inference(_pipeline(), _request(source))
+
+    assert calls == 2
+    assert result.raw_output["num_api_calls"] == 2
+    assert "total_tokens" not in result.raw_output
+    assert "cost_usd" not in result.raw_output
+    assert "page_usages" not in result.raw_output
+
+
 def test_single_image_run_inference_calls_bedrock_without_pdf_rasterization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

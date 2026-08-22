@@ -19,6 +19,8 @@ from parse_bench.inference.providers.base import (
     ProviderTransientError,
 )
 from parse_bench.inference.providers.parse._multipage_image import (
+    append_attempt_usages,
+    attempt_usages_complete,
     normalize_pdf_pages,
     open_document_page_images,
     run_pdf_pages,
@@ -44,6 +46,26 @@ def _request(source: Path) -> InferenceRequest:
         source_file_path=str(source),
         product_type=ProductType.PARSE,
     )
+
+
+def test_partial_attempt_usage_is_not_treated_as_exact_zero_buckets() -> None:
+    usages: list[dict[str, int]] = []
+
+    append_attempt_usages(
+        usages,
+        [{"stats": {"input_tokens": 4}, "page_number": 1, "attempt": 1, "status": "failed"}],
+    )
+
+    assert usages == [
+        {
+            "input_tokens": 4,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 0,
+            "_usage_known": 0,
+        }
+    ]
+    assert not attempt_usages_complete(usages)
 
 
 def test_timeout_drain_blocks_resubmission_until_running_worker_terminates() -> None:
@@ -127,6 +149,24 @@ def test_async_timeout_drain_propagates_caller_cancellation() -> None:
         future = executor.submit(worker)
         assert started.wait(timeout=1)
         asyncio.run(exercise(future))
+
+
+def test_async_timeout_drain_treats_queued_future_cancellation_as_retryable() -> None:
+    runner = object.__new__(InferenceRunner)
+    runner.provider = SimpleNamespace()
+    release = threading.Event()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        blocker = executor.submit(release.wait)
+        future = executor.submit(lambda: "must not run")
+        try:
+            outcome = asyncio.run(runner._cancel_inflight_and_drain_async("document", future))
+        finally:
+            release.set()
+            blocker.result(timeout=1)
+
+    assert outcome is None
+    assert future.cancelled()
 
 
 def test_sync_timeout_adopts_late_success_without_resubmission(tmp_path: Path) -> None:
@@ -557,6 +597,7 @@ def test_exhausted_page_retry_is_terminal_to_document_runner(
     runner.job_statuses = {}
     runner.pipeline = _pipeline()
     runner.provider = AdapterProvider()
+    runner.output_dir = tmp_path
     runner._prepare_source_file_for_provider = lambda example_id, path: path
     runner._fetch_parse_job_logs = lambda raw_result, example_id: None
     runner._save_result = lambda raw_result, normalized_result: None
@@ -568,6 +609,13 @@ def test_exhausted_page_retry_is_terminal_to_document_runner(
     assert error is not None and error[2] == ProviderRetryExhaustedError.__name__
     assert document_attempts == 1
     assert requested_pages == [1, 2, 2, 2]
+    payload = json.loads((tmp_path / "document.error.raw.json").read_text())
+    assert [(attempt["page_number"], attempt["status"]) for attempt in payload["attempts"]] == [
+        (1, "succeeded"),
+        (2, "failed"),
+        (2, "failed"),
+        (2, "failed"),
+    ]
 
 
 def test_multipage_aggregation_omits_partial_or_invalid_provider_metadata(tmp_path: Path, monkeypatch) -> None:

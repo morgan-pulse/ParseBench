@@ -263,7 +263,7 @@ def test_google_agentic_page_two_malformed_then_transient_exhausts_one_page_budg
     calls = debug_payload["api_calls"]
     assert [call["page_index"] for call in calls] == [1, 1, 1]
     assert [call["attempt"] for call in calls] == [1, 2, 3]
-    assert [call["usage"]["total_tokens"] for call in calls] == [11, 0, 13]
+    assert [call["usage"].get("total_tokens") for call in calls] == [11, None, 13]
     assert calls[0]["response"] is not None
     assert calls[1]["error"]["type"] == "ProviderTransientError"
     assert calls[2]["response"] is not None
@@ -308,12 +308,13 @@ def test_google_agentic_mixed_failures_can_succeed_on_final_owned_attempt(
 
     assert models.calls == 3
     assert result.raw_output["num_api_calls"] == 3
-    assert result.raw_output["total_tokens"] == 18
+    assert "total_tokens" not in result.raw_output
+    assert "cost_usd" not in result.raw_output
     page = result.raw_output["pages"][0]
     assert page["markdown"] == "success"
     calls = page["api_calls"]
     assert [call["attempt"] for call in calls] == [1, 2, 3]
-    assert [call["usage"]["total_tokens"] for call in calls] == [8, 0, 10]
+    assert [call["usage"].get("total_tokens") for call in calls] == [8, None, 10]
     assert calls[1]["error"]["type"] == "ProviderTransientError"
 
 

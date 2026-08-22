@@ -278,6 +278,10 @@ class InferenceRunner:
         self._signal_cancel_and_cancel_future(example_id, future)
         try:
             return await asyncio.shield(asyncio.wrap_future(future))
+        except asyncio.CancelledError:
+            if future.cancelled():
+                return None
+            raise
         except Exception:
             return None
 
@@ -738,6 +742,11 @@ class InferenceRunner:
             error_msg = f"Provider error: {str(e)}"
             if raw_result is not None:
                 self._save_result(raw_result, None)
+            debug_payload = getattr(e, "debug_payload", None)
+            if isinstance(debug_payload, dict):
+                debug_payload_path = self._save_error_debug_payload(example_id, debug_payload)
+                if debug_payload_path:
+                    error_msg += f" [debug payload: {debug_payload_path}]"
             error_traceback = traceback.format_exc()
             if self.use_rich and example_id in self.job_statuses:
                 self.job_statuses[example_id].status = "failed"

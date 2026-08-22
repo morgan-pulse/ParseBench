@@ -47,6 +47,7 @@ def run_page_with_retries[PageResultT](
     provider_name: str,
     page_number: int,
     attempt_ledger: list[dict[str, object]] | None = None,
+    prior_attempt_ledger: list[dict[str, object]] | None = None,
 ) -> PageResultT:
     """Run one billable page and record every physical provider attempt."""
 
@@ -66,9 +67,12 @@ def run_page_with_retries[PageResultT](
                     }
                 )
             if attempt == _PAGE_MAX_ATTEMPTS - 1:
+                debug_attempts = list(attempt_ledger or [])
+                if prior_attempt_ledger is not None and prior_attempt_ledger is not attempt_ledger:
+                    debug_attempts = [*prior_attempt_ledger, *debug_attempts]
                 raise ProviderRetryExhaustedError(
                     f"{provider_name} page {page_number} failed after {_PAGE_MAX_ATTEMPTS} attempts: {exc}",
-                    debug_payload={"attempts": list(attempt_ledger or [])},
+                    debug_payload={"attempts": debug_attempts},
                 ) from exc
             time.sleep(_PAGE_INITIAL_BACKOFF_S * (2**attempt))
         else:
@@ -119,9 +123,33 @@ def append_attempt_usages(
                 and not isinstance(value, bool)
                 and math.isfinite(value)
             }
+            required = {"input_tokens", "output_tokens", "total_tokens"}
+            usage_known = required.issubset(usage)
             for key in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
                 usage.setdefault(key, 0)
+            if not usage_known:
+                usage["_usage_known"] = 0
             usages.append(usage)
+
+
+def attempt_usages_complete(usages: list[dict[str, int]]) -> bool:
+    """Whether every physical attempt supplied a usable token accounting record."""
+    required = {"input_tokens", "output_tokens", "total_tokens"}
+    return bool(usages) and all(usage.get("_usage_known", 1) == 1 and required.issubset(usage) for usage in usages)
+
+
+def include_prior_attempts(
+    error: ProviderRetryExhaustedError,
+    prior_attempts: list[dict[str, object]],
+) -> None:
+    """Prepend completed-page attempts to a terminal retry payload."""
+    payload = dict(error.debug_payload or {})
+    current_attempts = payload.get("attempts")
+    payload["attempts"] = [
+        *prior_attempts,
+        *(current_attempts if isinstance(current_attempts, list) else []),
+    ]
+    error.debug_payload = payload
 
 
 def annotate_attempt_costs(
@@ -135,8 +163,10 @@ def annotate_attempt_costs(
         stats = attempt.get("stats")
         if not isinstance(stats, dict):
             continue
-        input_tokens = stats.get("input_tokens", 0)
-        output_tokens = stats.get("output_tokens", 0)
+        if "input_tokens" not in stats or "output_tokens" not in stats:
+            continue
+        input_tokens = stats["input_tokens"]
+        output_tokens = stats["output_tokens"]
         thinking_tokens = stats.get("thinking_tokens", 0)
         if not all(
             isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -445,12 +475,23 @@ def run_pdf_pages(
                 _save_png(image, page_path)
                 page_request = request.model_copy(update={"source_file_path": str(page_path)})
                 attempts: list[dict[str, object]] = []
-                page_result = run_page_with_retries(
-                    partial(run_single_image, pipeline, page_request),
-                    provider_name=pipeline.provider_name,
-                    page_number=page_index + 1,
-                    attempt_ledger=attempts,
-                )
+                try:
+                    page_result = run_page_with_retries(
+                        partial(run_single_image, pipeline, page_request),
+                        provider_name=pipeline.provider_name,
+                        page_number=page_index + 1,
+                        attempt_ledger=attempts,
+                    )
+                except ProviderRetryExhaustedError as error:
+                    completed_attempts: list[dict[str, object]] = []
+                    for record in page_results:
+                        record_attempts = record.get("attempts")
+                        if isinstance(record_attempts, list):
+                            completed_attempts.extend(
+                                attempt for attempt in record_attempts if isinstance(attempt, dict)
+                            )
+                    include_prior_attempts(error, completed_attempts)
+                    raise
                 page_results.append(
                     {
                         "page_index": page_index,

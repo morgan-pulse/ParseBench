@@ -789,13 +789,12 @@ class GoogleAgenticVisionRunner:
                         "request": request_summary,
                         "response": None,
                         "response_parts": [],
-                        "usage": extract_usage_from_response(None),
+                        "usage": {},
                         "final_text": "",
                         "error": {
                             "type": type(classified).__name__,
                             "message": last_error,
                         },
-                        "cost_usd": 0.0,
                     }
                 )
                 if attempt < max_attempts:

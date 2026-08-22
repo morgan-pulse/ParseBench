@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +20,7 @@ from parse_bench.inference.providers.base import (
 from parse_bench.inference.providers.parse import kdl_frontier_nano as kdl
 from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
 from parse_bench.schemas.pipeline import PipelineSpec
-from parse_bench.schemas.pipeline_io import InferenceRequest
+from parse_bench.schemas.pipeline_io import InferenceRequest, RawInferenceResult
 from parse_bench.schemas.product import ProductType
 
 KDL_SPEC = next(spec for spec in IMAGE_BACKED_PDF_PROVIDERS if spec.execution == "kdl")
@@ -50,6 +51,66 @@ def _provider() -> kdl.KdlFrontierNanoProvider:
     provider._timeout = 30
     provider._max_pages = 10
     return provider
+
+
+def _raw_kdl_result(raw_output: dict[str, object]) -> RawInferenceResult:
+    now = datetime.now()
+    request = InferenceRequest(
+        example_id="document",
+        source_file_path="document.pdf",
+        product_type=ProductType.PARSE,
+    )
+    return RawInferenceResult(
+        request=request,
+        pipeline=_pipeline(),
+        pipeline_name="kdl_frontier_nano_test",
+        product_type=ProductType.PARSE,
+        raw_output=raw_output,
+        started_at=now,
+        completed_at=now,
+        latency_in_ms=1,
+    )
+
+
+def test_kdl_normalize_rejects_non_contiguous_page_identities() -> None:
+    raw = _raw_kdl_result(
+        {
+            "markdown": "untrusted",
+            "pages": [
+                {"page_number": 2, "elements": []},
+                {"page_number": 3, "elements": []},
+            ],
+            "markdown_pages": [
+                {"page_number": 2, "content": "two"},
+                {"page_number": 3, "content": "three"},
+            ],
+        }
+    )
+
+    with pytest.raises(ProviderPermanentError, match="page identities are inconsistent"):
+        _provider().normalize(raw)
+
+
+def test_kdl_normalize_rebuilds_document_markdown_from_canonical_pages() -> None:
+    raw = _raw_kdl_result(
+        {
+            "markdown": "three before two",
+            "pages": [
+                {"page_number": 1, "elements": []},
+                {"page_number": 2, "elements": []},
+            ],
+            "markdown_pages": [
+                {"page_number": 1, "content": "one"},
+                {"page_number": 2, "content": "two"},
+            ],
+        }
+    )
+
+    output = _provider().normalize(raw).output
+
+    assert [page.page_index for page in output.pages] == [0, 1]
+    assert [page.page_number for page in output.layout_pages] == [1, 2]
+    assert output.markdown == "one\n\n---\n\n**Page 2**\n\ntwo"
 
 
 def _png_bytes(page_number: int) -> bytes:

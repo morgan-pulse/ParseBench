@@ -27,6 +27,7 @@ from parse_bench.inference.providers.parse._layout_utils import (
 from parse_bench.inference.providers.parse._multipage_image import (
     annotate_attempt_costs,
     append_attempt_usages,
+    attempt_usages_complete,
     close_derived_images,
     open_document_page_images,
     run_page_with_retries,
@@ -595,6 +596,7 @@ class OpenAIProvider(Provider):
                             provider_name=pipeline.provider_name,
                             page_number=page_index + 1,
                             attempt_ledger=attempts,
+                            prior_attempt_ledger=api_attempts,
                         )
                         api_attempts.extend(attempts)
                         append_attempt_usages(page_usages, attempts)
@@ -643,6 +645,7 @@ class OpenAIProvider(Provider):
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
                                 attempt_ledger=attempts,
+                                prior_attempt_ledger=api_attempts,
                             )
                             api_attempts.extend(attempts)
                             append_attempt_usages(page_usages, attempts)
@@ -662,6 +665,7 @@ class OpenAIProvider(Provider):
                                 provider_name=pipeline.provider_name,
                                 page_number=page_index + 1,
                                 attempt_ledger=attempts,
+                                prior_attempt_ledger=api_attempts,
                             )
                             api_attempts.extend(attempts)
                             append_attempt_usages(page_usages, attempts)
@@ -692,6 +696,20 @@ class OpenAIProvider(Provider):
                 output_rate_per_million=output_rate,
             )
             cost = (total_input * input_rate + (total_output + total_thinking) * output_rate) / 1_000_000
+            usage_summary = (
+                {
+                    "input_tokens": total_input,
+                    "output_tokens": total_output,
+                    "thinking_tokens": total_thinking,
+                    "total_tokens": total_all,
+                    "cost_usd": cost,
+                    "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
+                    "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
+                    "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                }
+                if attempt_usages_complete(page_usages)
+                else {}
+            )
 
             config_info: dict[str, Any] = {
                 "dpi": self._dpi,
@@ -708,14 +726,7 @@ class OpenAIProvider(Provider):
                 "mode": self._mode,
                 "bbox_scale": self._bbox_scale,
                 "config": config_info,
-                "input_tokens": total_input,
-                "output_tokens": total_output,
-                "thinking_tokens": total_thinking,
-                "total_tokens": total_all,
-                "cost_usd": cost,
-                "cost_per_page_usd": cost / num_pages if num_pages > 0 else 0.0,
-                "input_tokens_per_page": total_input / num_pages if num_pages > 0 else 0.0,
-                "output_tokens_per_page": total_output / num_pages if num_pages > 0 else 0.0,
+                **usage_summary,
                 "num_api_calls": len(api_attempts) if api_attempts else len(page_usages),
                 "api_attempts": api_attempts,
             }
