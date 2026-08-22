@@ -34,6 +34,8 @@ orchestrator so the maintainers can reproduce the submitted numbers end to end;
 section banners mark the vendored module boundaries.
 """
 
+# ruff: noqa: E501 -- vendored regression corpus contains an intentionally long OTSL sample.
+
 import asyncio
 import base64
 import enum
@@ -47,12 +49,13 @@ import os
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Match, Tuple, Union, cast
+from re import Match
+from typing import Any, Literal, cast
 
 import httpx
 import markdown as _markdown_lib
@@ -89,9 +92,7 @@ logger = logging.getLogger("kdl_frontier_nano")
 Enum = enum.Enum
 
 # from deepparser_v2/config/model_flow.py (verbatim values)
-from typing import Literal as _Literal  # explicit: alias below needs Literal at module init
-
-RecognitionStage = _Literal["text", "table", "picture", "formula"]
+RecognitionStage = Literal["text", "table", "picture", "formula"]
 RECOGNITION_STAGES: tuple = ("text", "table", "picture", "formula")
 
 
@@ -127,8 +128,6 @@ class ElementCategory(str, Enum):
 """Recognition bucket contract shared by planning and layout grouping."""
 
 # [vendor-strip] from __future__ import annotations
-
-from typing import Sequence
 
 # [vendor-strip] from ..schemas.element_schema import ElementCategory
 # [vendor-strip] from .model_flow import RECOGNITION_STAGES, RecognitionStage
@@ -185,9 +184,6 @@ def _category_value(category: str | ElementCategory) -> str:
 # [vendored] layout_contract
 # ==========================================================================
 """Layout category contract shared by layout provider adapters."""
-
-from collections.abc import Mapping
-from typing import Any
 
 # [vendor-strip] from ..config.recognition_contract import category_to_recognition_bucket
 # [vendor-strip] from ..schemas.element_schema import ElementCategory
@@ -257,12 +253,8 @@ def _stringify_category(category: Any) -> str:
 # ==========================================================================
 # [vendor-strip] from __future__ import annotations
 
-import math
-from typing import Tuple
 
 # [vendor-strip] from loguru import logger
-from PIL import Image
-from pydantic import BaseModel, Field
 
 
 # 이미지 처리 설정값
@@ -338,7 +330,7 @@ def calculate_dimensions(
     factor: int = ImageConfig.FACTOR,
     min_pixels: int = ImageConfig.MIN_PIXELS,
     max_pixels: int = ImageConfig.MAX_PIXELS,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """이미지 크기 계산"""
     # 종횡비 검증
     aspect_ratio = max(height, width) / min(height, width)
@@ -383,8 +375,8 @@ def smart_resize(image: Image.Image) -> Image.Image:
             return resized_img
         else:
             return image
-    except Exception:
-        raise ValueError(f"Failed to resize image: {image}")
+    except Exception as exc:
+        raise ValueError(f"Failed to resize image: {image}") from exc
 
 
 def is_monochromatic(image: Image.Image) -> bool:
@@ -519,12 +511,6 @@ def preprocess_for_vlm(image: Image.Image) -> Image.Image:
 # [vendored] native_layout
 # ==========================================================================
 """the model layout token parsing utilities."""
-
-import re
-from typing import Any
-
-from PIL import Image
-from pydantic import BaseModel, Field
 
 # [vendor-strip] from .layout_contract import normalize_layout_category
 
@@ -912,13 +898,7 @@ def _attachment_distance(
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import html
-import itertools
-import re
-from typing import Any, Dict, List, Tuple, cast
-
 # [vendor-strip] from loguru import logger
-from pydantic import BaseModel, computed_field, model_validator
 
 
 class TableCell(BaseModel):
@@ -985,12 +965,12 @@ class TableData(BaseModel):
         num_cols (int): Number of columns.
     """
 
-    table_cells: List[TableCell] = []
+    table_cells: list[TableCell] = []
     num_rows: int = 0
     num_cols: int = 0
 
     @computed_field
-    def grid(self) -> List[List[TableCell]]:
+    def grid(self) -> list[list[TableCell]]:
         """
         Returns a 2D grid of TableCell objects for the table.
 
@@ -1039,7 +1019,7 @@ IGNORABLE_OTSL_TAIL_PATTERN = re.compile(
 )
 
 
-def otsl_extract_tokens_and_text(s: str) -> Tuple[List[str], List[str]]:
+def otsl_extract_tokens_and_text(s: str) -> tuple[list[str], list[str]]:
     """
     Extract OTSL tags and text parts from the input string.
 
@@ -1056,7 +1036,7 @@ def otsl_extract_tokens_and_text(s: str) -> Tuple[List[str], List[str]]:
     return tokens, text_parts
 
 
-def otsl_parse_texts(texts: List[str], tokens: List[str]) -> Tuple[List[TableCell], List[List[str]]]:
+def otsl_parse_texts(texts: list[str], tokens: list[str]) -> tuple[list[TableCell], list[list[str]]]:
     """
     Parse OTSL text and tags into TableCell objects and tag structure.
 
@@ -1069,7 +1049,7 @@ def otsl_parse_texts(texts: List[str], tokens: List[str]) -> Tuple[List[TableCel
     """
     split_word = OTSL_NL
     split_row_tokens = [list(y) for x, y in itertools.groupby(tokens, lambda z: z == split_word) if not x]
-    table_cells: List[TableCell] = []
+    table_cells: list[TableCell] = []
     r_idx = 0
     c_idx = 0
 
@@ -1101,7 +1081,7 @@ def otsl_parse_texts(texts: List[str], tokens: List[str]) -> Tuple[List[TableCel
                 text_idx += 1
         texts = new_texts
 
-    def count_right(tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]) -> int:
+    def count_right(tokens: list[list[str]], c_idx: int, r_idx: int, which_tokens: list[str]) -> int:
         span = 0
         c_idx_iter = c_idx
         while tokens[r_idx][c_idx_iter] in which_tokens:
@@ -1111,7 +1091,7 @@ def otsl_parse_texts(texts: List[str], tokens: List[str]) -> Tuple[List[TableCel
                 return span
         return span
 
-    def count_down(tokens: List[List[str]], c_idx: int, r_idx: int, which_tokens: List[str]) -> int:
+    def count_down(tokens: list[list[str]], c_idx: int, r_idx: int, which_tokens: list[str]) -> int:
         span = 0
         r_idx_iter = r_idx
         while tokens[r_idx_iter][c_idx] in which_tokens:
@@ -1214,7 +1194,7 @@ def otsl_pad_to_sqr_v2(otsl_str: str) -> str:
     if OTSL_NL not in otsl_str:
         return otsl_str + OTSL_NL
     lines = otsl_str.split(OTSL_NL)
-    row_data: List[Dict[str, Any]] = []
+    row_data: list[dict[str, Any]] = []
     for line in lines:
         if not line:
             continue
@@ -1244,7 +1224,7 @@ def otsl_pad_to_sqr_v2(otsl_str: str) -> str:
 
     repaired_lines = []
     for row in row_data:
-        cells = cast(List[str], row["raw_cells"])
+        cells = cast(list[str], row["raw_cells"])
         current_len = len(cells)
         # Never truncate rows here. Merge markers such as <lcel>/<ucel>/<xcel>
         # carry structural information, so cutting longer rows can drop content.
@@ -1278,7 +1258,7 @@ def convert_otsl_to_html(otsl_content: str) -> str:
     return export_to_html(table_data)
 
 
-def _collapse_placeholder_with_ignorable_tail(otsl_content: str, placeholders: List[str]) -> str:
+def _collapse_placeholder_with_ignorable_tail(otsl_content: str, placeholders: list[str]) -> str:
     stripped = otsl_content.strip()
     for placeholder in placeholders:
         if stripped == placeholder:
@@ -1293,7 +1273,7 @@ def _collapse_placeholder_with_ignorable_tail(otsl_content: str, placeholders: L
 _OTSL_STRUCTURAL_TAG_RE = re.compile(r"<(?:otsl|fcel|ecel|lcel|ucel|xcel)>")
 
 
-def _flatten_top_level_table_placeholders(otsl_content: str, placeholder_to_html: Dict[str, str]) -> str | None:
+def _flatten_top_level_table_placeholders(otsl_content: str, placeholder_to_html: dict[str, str]) -> str | None:
     """If the top level is one or more table placeholders plus only non-OTSL
     text (sibling tables and/or a the model-appended caption/note after
     ``</otsl>``), return the concatenated HTML of those tables in order of
@@ -1355,7 +1335,7 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
 
     # 1단계: 모든 중첩 테이블을 placeholder로 치환하고 OTSL 저장
     # placeholder -> OTSL 매핑 (아직 HTML 아님!)
-    placeholder_to_otsl: Dict[str, str] = {}
+    placeholder_to_otsl: dict[str, str] = {}
 
     # 가장 안쪽 <otsl>...</otsl> 블록을 찾는 정규식
     nested_pattern = r"<otsl>((?:(?!<otsl>).)*?)</otsl>"
@@ -1394,7 +1374,7 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
     otsl_content = _collapse_placeholder_with_ignorable_tail(otsl_content, list(placeholder_to_otsl))
 
     # 2단계: 모든 레벨의 OTSL을 HTML로 변환 (placeholder 포함된 채로)
-    placeholder_to_html: Dict[str, str] = {}
+    placeholder_to_html: dict[str, str] = {}
 
     for placeholder, otsl in placeholder_to_otsl.items():
         try:
@@ -1405,7 +1385,7 @@ def convert_otsl_to_html_v2(otsl_content: str, debug: bool = False) -> str:
         except Exception as e:
             placeholder_to_html[placeholder] = "<table></table>"
             if debug:
-                logger.error("OTSL conversion failed", placeholder=placeholder, error=str(e))
+                logger.error("OTSL conversion failed (%s): %s", placeholder, e)
 
     # 최상위 레벨도 HTML로 변환
     top_stripped = otsl_content.strip()
@@ -1468,16 +1448,11 @@ if __name__ == "__main__":
     print("=== Simple nested (v2) ===")
     print(convert_otsl_to_html_v2(simple_nested, debug=True))
 
+
 # ==========================================================================
 # [vendored] truncate_repeat
 # ==========================================================================
-import re
-import unicodedata
-from collections import Counter
-from typing import Tuple, Union
-
-
-def find_shortest_repeating_substring(s: str) -> Union[str, None]:
+def find_shortest_repeating_substring(s: str) -> str | None:
     """
     Find the shortest substring that repeats to form the entire string.
 
@@ -1496,7 +1471,7 @@ def find_shortest_repeating_substring(s: str) -> Union[str, None]:
     return None
 
 
-def find_repeating_suffix(s: str, min_len: int = 8, min_repeats: int = 5) -> Union[Tuple[str, str, int], None]:
+def find_repeating_suffix(s: str, min_len: int = 8, min_repeats: int = 5) -> tuple[str, str, int] | None:
     """
     Detect if string ends with a repeating phrase.
 
@@ -1708,9 +1683,6 @@ Picture Response Validator
 
 VLM에서 반환된 picture/chart/flowchart 응답의 유효성을 검증합니다.
 """
-
-import re
-from decimal import Decimal
 
 # [vendor-strip] from loguru import logger
 
@@ -1934,13 +1906,13 @@ def merge_translated_table_with_source_values(
         return translated
 
     merged_rows: list[list[str]] = []
-    for row_idx, (translated_row, source_row) in enumerate(zip(translated_rows, source_rows)):
+    for row_idx, (translated_row, source_row) in enumerate(zip(translated_rows, source_rows, strict=False)):
         if row_idx == 1:
             merged_rows.append(["---"] * len(translated_rows[0]))
             continue
 
         merged_row = []
-        for translated_cell, source_cell in zip(translated_row, source_row):
+        for translated_cell, source_cell in zip(translated_row, source_row, strict=False):
             if (
                 _KRW_VALUE_PATTERN.fullmatch(source_cell)
                 or _PERCENT_PATTERN.fullmatch(source_cell)
@@ -2039,8 +2011,6 @@ def is_valid_markdown_table(content: str) -> bool:
 # chart table reaches the markdown as a clean, parseable table.
 # ---------------------------------------------------------------------------
 
-import html as _html
-
 _NATIVE_CLASS_PATTERN = re.compile(r"<\|class_start\|>\s*(?P<cls>[^<|]*?)\s*<\|class_end\|>", re.S)
 _NATIVE_CONTENT_PATTERN = re.compile(r"<\|content_start\|>(?P<body>.*?)<\|content_end\|>", re.S)
 _NATIVE_TOKEN_PATTERN = re.compile(r"<\|[^|>]*\|>")
@@ -2060,7 +2030,7 @@ def parse_native_chart_tokens(content):
         return None
     # Unescape HTML entities and drop wrapping image/paragraph syntax so the
     # token markers are visible (e.g. "![<|class_start|>..." or "<p>&lt;|..").
-    text = _html.unescape(content)
+    text = html.unescape(content)
     if "<|content_start|>" not in text and "<|class_start|>" not in text:
         return None
 
@@ -2094,11 +2064,6 @@ TableElementPostProcessor
 
 테이블 요소의 OTSL 태그를 HTML로 변환합니다.
 """
-
-import html
-import json
-import re
-from typing import Match
 
 # [vendor-strip] from loguru import logger
 
@@ -2226,10 +2191,6 @@ DataChartElementPostProcessor
 차트 요소를 후처리합니다 (현재는 bypass).
 """
 
-import html
-import re
-
-import markdown
 # [vendor-strip] from loguru import logger
 
 # [vendor-strip] from ..schemas.element_schema import DocumentElement, ElementCategory
@@ -2310,9 +2271,6 @@ STRUCTURE (and TEDS-Structure) is unchanged. Stdlib-only (no model, no I/O).
 """
 
 # [vendor-strip] from __future__ import annotations
-
-import re
-from collections import Counter
 
 # --------------------------------------------------------------------------------------
 # Rule 1: multi-level table-header marking  (port of header_transform.transform_markdown)
@@ -2737,7 +2695,7 @@ def _nano_is_single_clean_otsl(content: Any) -> bool:
     return isinstance(content, str) and content.count("<otsl>") == 1 and ("<fcel>" in content or "<ecel>" in content)
 
 
-def _nano_apply_picture_result(el: Dict[str, Any], content: str | None) -> None:
+def _nano_apply_picture_result(el: dict[str, Any], content: str | None) -> None:
     """Port of picture_recognition.apply_picture_result for the single-model
     run (enable_chart=True, caption_language='en').
 
@@ -2773,7 +2731,7 @@ def _nano_apply_picture_result(el: Dict[str, Any], content: str | None) -> None:
         el["content"] = content_str
 
 
-def _nano_postprocess_element(el: Dict[str, Any]) -> None:
+def _nano_postprocess_element(el: dict[str, Any]) -> None:
     """Port of postprocessing.PostProcessor (first matching processor wins;
     failures keep the original content)."""
     content = el.get("content") or ""
@@ -2849,7 +2807,7 @@ def _nano_format_formula(content: str) -> str:
     return f"```latex\n{stripped}\n```"
 
 
-def _nano_image_markdown(el: Dict[str, Any]) -> str:
+def _nano_image_markdown(el: dict[str, Any]) -> str:
     image_src = el.get("picture_path") or ""
     if not image_src:
         return ""
@@ -2857,7 +2815,7 @@ def _nano_image_markdown(el: Dict[str, Any]) -> str:
     return f"![{alt}]({image_src})"
 
 
-def _nano_format_element(el: Dict[str, Any]) -> str:
+def _nano_format_element(el: dict[str, Any]) -> str:
     category = el.get("category", "Text")
     content = el.get("content") or ""
     if category in ("Title", "Section-header"):
@@ -2890,9 +2848,9 @@ def _nano_format_element(el: Dict[str, Any]) -> str:
 
 
 def _nano_assemble_markdown(
-    elements: List[Dict[str, Any]],
+    elements: list[dict[str, Any]],
     page_numbers: Iterable[int],
-) -> Tuple[str, List[Dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]]]:
     """Port of response_builder._build_markdown_context/_build_full_markdown:
     sort by (page, layout_order), group contiguous same-page List-items into
     one block, drop empty blocks, page separators '---\\n\\n**Page N**' in the
@@ -2904,7 +2862,7 @@ def _nano_assemble_markdown(
         and not isinstance(e.get("page_number"), bool)
         and e.get("page_number", 0) >= 1
     ]
-    blocks: List[Tuple[int, str]] = []  # (page_number, content)
+    blocks: list[tuple[int, str]] = []  # (page_number, content)
     index = 0
     while index < len(valid):
         el = valid[index]
@@ -2927,11 +2885,11 @@ def _nano_assemble_markdown(
         if content:
             blocks.append((page, content))
 
-    pages_md: Dict[int, List[str]] = {page_number: [] for page_number in page_numbers}
+    pages_md: dict[int, list[str]] = {page_number: [] for page_number in page_numbers}
     for page, content in blocks:
         pages_md.setdefault(page, []).append(content)
 
-    md_parts: List[str] = []
+    md_parts: list[str] = []
     for index, (page, parts) in enumerate(sorted(pages_md.items())):
         if index:
             md_parts.append(f"---\n\n**Page {page}**")
@@ -2954,7 +2912,7 @@ class _NanoEngine:
 
     async def parse_pages(self, page_images: Iterable[Image.Image]) -> dict:
         semaphore = asyncio.Semaphore(self._max_concurrent)
-        elements: List[Dict[str, Any]] = []
+        elements: list[dict[str, Any]] = []
         page_numbers: list[int] = []
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             for page_no, image in enumerate(page_images, start=1):
@@ -2974,7 +2932,7 @@ class _NanoEngine:
         for page in markdown_pages:
             page["content"] = postprocess_markdown(page["content"])
 
-        pages_payload: Dict[int, List[Dict[str, Any]]] = {page_number: [] for page_number in page_numbers}
+        pages_payload: dict[int, list[dict[str, Any]]] = {page_number: [] for page_number in page_numbers}
         for el in elements:
             pages_payload.setdefault(el["page_number"], []).append(
                 {
@@ -3211,7 +3169,7 @@ class KdlFrontierNanoProvider(Provider):
                 x1, y1, x2, y2 = bbox
             else:
                 return None
-            if None in (x1, y1, x2, y2):
+            if x1 is None or y1 is None or x2 is None or y2 is None:
                 return None
             return LayoutSegmentIR(
                 x=float(x1),
