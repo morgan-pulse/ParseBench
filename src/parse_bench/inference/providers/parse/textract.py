@@ -100,6 +100,7 @@ class TextractProvider(Provider):
         # Initialize boto3 client
         try:
             import boto3
+            from botocore.config import Config
         except ImportError as e:
             raise ProviderConfigError("boto3 package not installed. Run: pip install boto3") from e
 
@@ -108,6 +109,7 @@ class TextractProvider(Provider):
             aws_access_key_id=self._aws_access_key_id,
             aws_secret_access_key=self._aws_secret_access_key,
             region_name=self._aws_region,
+            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
         )
 
     # Textract synchronous API limits

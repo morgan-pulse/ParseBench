@@ -7,8 +7,13 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from parse_bench.inference.providers.base import ProviderPermanentError, ProviderTransientError
+from parse_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRetryExhaustedError,
+    ProviderTransientError,
+)
 from parse_bench.inference.providers.parse._multipage_image import IMAGE_BACKED_PDF_PROVIDERS
+from parse_bench.inference.providers.parse.textract import TextractProvider
 from parse_bench.schemas.parse_output import ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest
@@ -54,6 +59,35 @@ class _TextractClient:
                 }
             ]
         }
+
+
+def test_textract_client_disables_hidden_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    import boto3
+
+    client = object()
+    captured: dict[str, object] = {}
+
+    def build_client(service_name: str, **kwargs: object) -> object:
+        captured["service_name"] = service_name
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(boto3, "client", build_client)
+
+    provider = TextractProvider(
+        "textract",
+        {
+            "aws_access_key_id": "test-access-key",
+            "aws_secret_access_key": "test-secret-key",
+            "aws_region": "us-test-1",
+        },
+    )
+
+    assert provider._textract_client is client
+    assert captured["service_name"] == "textract"
+    config = captured["config"]
+    assert config.retries["total_max_attempts"] == 1  # type: ignore[attr-defined]
+    assert config.retries["mode"] == "standard"  # type: ignore[attr-defined]
 
 
 def _provider(module_name: str, class_name: str, dpi: int) -> Any:
@@ -348,6 +382,35 @@ def test_dots_ocr_raises_terminal_error_after_page_retries_exhausted(
         provider.run_inference(_pipeline("dots_ocr"), _request(source))
 
     assert page_widths == [9, 9, 9]
+    assert delays == [2.0, 4.0]
+
+
+def test_textract_page_retry_budget_is_exactly_three_billable_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "document.pdf"
+    source.touch()
+    _mock_pdf(source, monkeypatch)
+    provider = _provider("textract", "TextractProvider", 300)
+
+    class AlwaysTransientClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def analyze_document(self, **kwargs: object) -> dict[str, object]:
+            self.calls += 1
+            raise ProviderTransientError("retry me")
+
+    client = AlwaysTransientClient()
+    provider._textract_client = client
+    delays: list[float] = []
+    monkeypatch.setattr("time.sleep", delays.append)
+
+    with pytest.raises(ProviderRetryExhaustedError, match="textract page 1 failed after 3 attempts"):
+        provider.run_inference(_pipeline("textract"), _request(source))
+
+    assert client.calls == 3
     assert delays == [2.0, 4.0]
 
 
