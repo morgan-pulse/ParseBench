@@ -22,16 +22,16 @@ _Top 10 by Overall score. For the full sortable, filterable leaderboard, see [pa
 
 | Rank | Provider | Category | Overall | Tables | Charts | Content Faith. | Sem. Format. | Visual Ground. | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---:|
-| 1 | LlamaParse Agentic | LlamaParse | 84.88 | 90.74 | 78.11 | 89.68 | 85.24 | 80.62 | 1.25¢ |
-| 2 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15¢ |
-| 3 | LlamaParse Cost Effective | LlamaParse | 76.77 | 81.42 | 70.15 | 90.92 | 68.78 | 72.59 | 0.38¢ |
-| 4 | KDL-Frontier-Parser-nano | VLM - Open Weight | 76.36 | 85.56 | 63.41 | 87.19 | 66.81 | 78.84 | — |
-| 5 | Extend (2.0) | Commercial - Startup APIs | 75.33 | 84.82 | 78.31 | 84.59 | 60.31 | 68.61 | 2.50¢ |
-| 6 | Google Gemini 3 Flash (Thinking High) | VLM - Proprietary | 75.05 | 91.50 | 64.79 | 90.87 | 68.31 | 59.77 | 2.41¢ |
-| 7 | Infinity-Parser2-Pro | VLM - Open Weight | 74.28 | 86.4 | 61.3 | 89.7 | 59.1 | 74.9 | — |
-| 8 | Extend Light (1.0) | Commercial - Startup APIs | 73.26 | 75.8 | 78.6 | 84.8 | 58.6 | 68.5 | 0.62¢ |
-| 9 | Infinity-Parser2-Flash | VLM - Open Weight | 73.25 | 82.88 | 55.56 | 89.52 | 57.7 | 80.61 | — |
-| 10 | Reducto (Agentic) | Commercial - Startup APIs | 72.97 | 80.42 | 73.4 | 86.37 | 57.6 | 67.07 | 4.76¢ |
+| 1 | LlamaParse Agentic Plus | LlamaParse | 90.20 | 93.37 | 94.18 | 92.25 | 87.12 | 84.09 | 5.62¢ |
+| 2 | LlamaParse Agentic | LlamaParse | 87.01 | 88.88 | 88.68 | 91.78 | 81.44 | 84.25 | 1.25¢ |
+| 3 | LlamaParse Cost Effective | LlamaParse | 80.61 | 84.19 | 77.91 | 89.87 | 67.29 | 83.77 | 0.38¢ |
+| 4 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15.00¢ |
+| 5 | KDL-Frontier-Parser-nano | VLM - Open Weight | 76.36 | 85.56 | 63.41 | 87.19 | 66.81 | 78.84 | — |
+| 6 | Extend (2.0) | Commercial - Startup APIs | 75.33 | 84.82 | 78.31 | 84.59 | 60.31 | 68.61 | 2.50¢ |
+| 7 | Google Gemini 3 Flash (Thinking High) | VLM - Proprietary | 75.05 | 91.50 | 64.79 | 90.87 | 68.31 | 59.77 | 2.41¢ |
+| 8 | Infinity-Parser2-Pro | VLM - Open Weight | 74.28 | 86.4 | 61.3 | 89.7 | 59.1 | 74.9 | — |
+| 9 | Extend Light (1.0) | Commercial - Startup APIs | 73.26 | 75.8 | 78.6 | 84.8 | 58.6 | 68.5 | 0.62¢ |
+| 10 | Infinity-Parser2-Flash | VLM - Open Weight | 73.25 | 82.88 | 55.56 | 89.52 | 57.7 | 80.61 | — |
 <!-- LEADERBOARD:END -->
 
 **Inclusion criteria:**
