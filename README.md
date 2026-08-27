@@ -5,6 +5,8 @@
 [![Dataset](https://img.shields.io/badge/HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/llamaindex/ParseBench)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
+> **Related:** For schema-guided enterprise document extraction, see our companion benchmark [ExtractBench](https://github.com/run-llama/ExtractBench).
+
 **ParseBench** is a benchmark for evaluating how well document parsing tools convert PDFs into structured output that AI agents can reliably act on. It tests whether parsed output preserves the structure and meaning needed for autonomous decisions — not just whether it looks similar to a reference text.
 
 The benchmark covers ~2,000 human-verified pages from real enterprise documents (insurance, finance, government), organized around five capability dimensions, each targeting a failure mode that breaks production agent workflows.
