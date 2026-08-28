@@ -309,6 +309,7 @@ class LayoutDetectionModel(StrEnum):
     QFOCR_LAYOUT = "qfocr_layout"
     DATALAB_LAYOUT = "datalab_layout"
     QWEN3_5_LAYOUT = "qwen3_5_layout"
+    QWEN3_8_LAYOUT = "qwen3_8_layout"
     GEMINI_LAYOUT = "gemini_layout"
     OPENAI_LAYOUT = "openai_layout"
     ANTHROPIC_LAYOUT = "anthropic_layout"

@@ -1175,6 +1175,23 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
     )
 
     # =========================================================================
+    # GLM (z.ai)
+    # =========================================================================
+
+    register_fn(
+        PipelineSpec(
+            pipeline_name="glm_5_3_flash_parse_with_layout_file",
+            provider_name="glm_zai",
+            product_type=ProductType.PARSE,
+            config={
+                "model": "glm-5.3-flash",
+                "max_tokens": 32768,
+                "mode": "parse_with_layout_file",
+            },
+        )
+    )
+
+    # =========================================================================
     # Qwen3.5-4B vLLM
     # =========================================================================
 
@@ -1288,6 +1305,32 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
                 "model": "qwen3.6-35b-a3b-fp8",
                 "prompt_mode": "layout",
             },
+        )
+    )
+
+    # Qwen3.8-27B FP8 reuses the existing Qwen layout prompt. The two
+    # pipelines differ only by the explicit reasoning toggle.
+    qwen38_27b_layout_config = {
+        "server_url_env": "QWEN3_8_27B_SERVER_URL",
+        "model": "qwen3.8-27b-fp8",
+        "prompt_mode": "layout",
+    }
+
+    register_fn(
+        PipelineSpec(
+            pipeline_name="qwen3_8_27b_parse_with_layout",
+            provider_name="qwen3_8",
+            product_type=ProductType.PARSE,
+            config={**qwen38_27b_layout_config, "enable_thinking": False},
+        )
+    )
+
+    register_fn(
+        PipelineSpec(
+            pipeline_name="qwen3_8_27b_thinking_parse_with_layout",
+            provider_name="qwen3_8",
+            product_type=ProductType.PARSE,
+            config={**qwen38_27b_layout_config, "enable_thinking": True},
         )
     )
 
@@ -1903,9 +1946,7 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
     ):
         register_fn(
             PipelineSpec(
-                pipeline_name=(
-                    f"openai_gpt_5_6_{_gpt56_suffix}_reasoning_none_parse_with_layout_file"
-                ),
+                pipeline_name=(f"openai_gpt_5_6_{_gpt56_suffix}_reasoning_none_parse_with_layout_file"),
                 provider_name="openai",
                 product_type=ProductType.PARSE,
                 config={
@@ -2093,7 +2134,7 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
             product_type=ProductType.PARSE,
             config={
                 "endpoint_url": "",  # via KDL_NANO_ENDPOINT_URL
-                "model": "",         # via KDL_NANO_MODEL (default kdl-frontier-parser-nano)
+                "model": "",  # via KDL_NANO_MODEL (default kdl-frontier-parser-nano)
                 "dpi": 144,
                 "timeout": 900,
             },
@@ -2112,7 +2153,7 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
             product_type=ProductType.PARSE,
             config={
                 "endpoint_url": "",  # via FLORIN_NANO_ENDPOINT_URL
-                "model": "",         # via FLORIN_NANO_MODEL (default florin-parser-nano)
+                "model": "",  # via FLORIN_NANO_MODEL (default florin-parser-nano)
                 "dpi": 144,
                 "timeout": 900,
             },

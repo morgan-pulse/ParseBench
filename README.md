@@ -25,13 +25,13 @@ _Top 10 by Overall score. For the full sortable, filterable leaderboard, see [pa
 | 1 | LlamaParse Agentic Plus | LlamaParse | 90.20 | 93.37 | 94.18 | 92.25 | 87.12 | 84.09 | 5.62¢ |
 | 2 | LlamaParse Agentic | LlamaParse | 87.01 | 88.88 | 88.68 | 91.78 | 81.44 | 84.25 | 1.25¢ |
 | 3 | LlamaParse Cost Effective | LlamaParse | 80.61 | 84.19 | 77.91 | 89.87 | 67.29 | 83.77 | 0.38¢ |
-| 4 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15.00¢ |
-| 5 | florin-parser-nano | VLM - Open Weight | 76.69 | 86.10 | 65.19 | 87.37 | 70.64 | 74.14 | — |
-| 6 | KDL-Frontier-Parser-nano | VLM - Open Weight | 76.36 | 85.56 | 63.41 | 87.19 | 66.81 | 78.84 | — |
-| 7 | Extend (2.0) | Commercial - Startup APIs | 75.33 | 84.82 | 78.31 | 84.59 | 60.31 | 68.61 | 2.50¢ |
-| 8 | Google Gemini 3 Flash (Thinking High) | VLM - Proprietary | 75.05 | 91.50 | 64.79 | 90.87 | 68.31 | 59.77 | 2.41¢ |
-| 9 | Infinity-Parser2-Pro | VLM - Open Weight | 74.28 | 86.4 | 61.3 | 89.7 | 59.1 | 74.9 | — |
-| 10 | Extend Light (1.0) | Commercial - Startup APIs | 73.26 | 75.8 | 78.6 | 84.8 | 58.6 | 68.5 | 0.62¢ |
+| 4 | oi-parser | Commercial - Startup APIs | 78.30 | 92.62 | 78.28 | 86.17 | 66.88 | 67.53 | — |
+| 5 | Pulse Ultra 2 | Commercial - Startup APIs | 77.08 | 75.45 | 90.82 | 79.49 | 73.05 | 66.56 | 15.00¢ |
+| 6 | florin-parser-nano | VLM - Open Weight | 76.69 | 86.10 | 65.19 | 87.37 | 70.64 | 74.14 | — |
+| 7 | KDL-Frontier-Parser-nano | VLM - Open Weight | 76.36 | 85.56 | 63.41 | 87.19 | 66.81 | 78.84 | — |
+| 8 | Extend (2.0) | Commercial - Startup APIs | 75.33 | 84.82 | 78.31 | 84.59 | 60.31 | 68.61 | 2.50¢ |
+| 9 | Google Gemini 3 Flash (Thinking High) | VLM - Proprietary | 75.05 | 91.50 | 64.79 | 90.87 | 68.31 | 59.77 | 2.41¢ |
+| 10 | Infinity-Parser2-Pro | VLM - Open Weight | 74.28 | 86.4 | 61.3 | 89.7 | 59.1 | 74.9 | — |
 <!-- LEADERBOARD:END -->
 
 **Inclusion criteria:**

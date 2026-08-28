@@ -97,6 +97,12 @@ These pipelines use hosted APIs. You only need an API key in your `.env` file.
 | **`google_gemini_3_6_flash_parse_with_layout_file`** | Gemini 3.6 Flash, default thinking + layout, file mode (In paper: *Google Gemini 3.6 Flash (Thinking Medium)*) | `GOOGLE_GEMINI_API_KEY` |
 | **`google_gemini_3_6_flash_no_thinking_parse_with_layout_file`** | Gemini 3.6 Flash, minimal thinking + layout, file mode (In paper: *Google Gemini 3.6 Flash (Thinking Minimal)*) | `GOOGLE_GEMINI_API_KEY` |
 
+### GLM (z.ai)
+
+| Pipeline | Description | Env Var |
+|---|---|---|
+| `glm_5_3_flash_parse_with_layout_file` | GLM-5.3 Flash, parse + layout, file mode | `GLM_ZAI_API_KEY` |
+
 ### Azure Document Intelligence
 
 | Pipeline | Description | Env Vars |
@@ -195,12 +201,14 @@ These pipelines require you to deploy the model on your own infrastructure (e.g.
 | `gemma4_e4b_vllm` | Gemma 4 E4B (dense 8B), parse mode | `GEMMA4_SERVER_URL` |
 | `gemma4_e4b_vllm_with_layout` | Gemma 4 E4B, layout mode | `GEMMA4_SERVER_URL` |
 
-### Qwen3.5-4B
+### Qwen
 
 | Pipeline | Description | Env Var |
 |---|---|---|
 | **`qwen3_5_4b_vllm_parse`** | Parse mode, markdown (In paper: *Qwen 3 VL*) | `QWEN35_SERVER_URL` |
 | **`qwen3_5_4b_vllm_layout`** | Layout mode, JSON with bboxes (In paper: *Qwen 3 VL*) | `QWEN35_SERVER_URL` |
+| `qwen3_8_27b_parse_with_layout` | Qwen3.8-27B-FP8, parse + layout | `QWEN3_8_27B_SERVER_URL` |
+| `qwen3_8_27b_thinking_parse_with_layout` | Qwen3.8-27B-FP8, parse + layout with thinking | `QWEN3_8_27B_SERVER_URL` |
 
 ### Chandra OCR 2
 
