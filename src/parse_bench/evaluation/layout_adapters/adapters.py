@@ -1344,9 +1344,7 @@ class OIParserLayoutAdapter(LayoutAdapter):
 
     @classmethod
     def matches(cls, inference_result: InferenceResult) -> bool:
-        return isinstance(inference_result.output, ParseOutput) and bool(
-            inference_result.output.layout_pages
-        )
+        return isinstance(inference_result.output, ParseOutput) and bool(inference_result.output.layout_pages)
 
     def to_layout_output(
         self,
@@ -2617,9 +2615,9 @@ class DatalabLayoutAdapter(LayoutAdapter):
         )
 
 
-@register_layout_adapter("qwen3_5", priority=90)
-class Qwen35LayoutAdapter(LayoutAdapter):
-    """Adapter that extracts LayoutOutput from Qwen3.5 ParseOutput.layout_pages.
+@register_layout_adapter("qwen3_5", "qwen3_8", priority=90)
+class QwenLayoutAdapter(LayoutAdapter):
+    """Adapter that extracts LayoutOutput from Qwen ParseOutput.layout_pages.
 
     Enables cross-evaluation: the ``qwen3_5_4b_vllm`` PARSE pipeline can be
     evaluated against layout detection datasets using the bboxes from the
@@ -2640,7 +2638,7 @@ class Qwen35LayoutAdapter(LayoutAdapter):
             config = raw_output.get("_config", {})
             if isinstance(config, dict):
                 model = config.get("model", "")
-                return isinstance(model, str) and (model.startswith("qwen3.5") or model.startswith("qwen3.6"))
+                return isinstance(model, str) and model.startswith("qwen3.")
         return False
 
     def to_layout_output(
@@ -2656,11 +2654,11 @@ class Qwen35LayoutAdapter(LayoutAdapter):
             return inference_result.output.model_copy(update={"predictions": filtered})
 
         if not isinstance(inference_result.output, ParseOutput):
-            raise ValueError("Qwen35LayoutAdapter requires ParseOutput or LayoutOutput")
+            raise ValueError("QwenLayoutAdapter requires ParseOutput or LayoutOutput")
 
         layout_pages = inference_result.output.layout_pages
         if not layout_pages:
-            raise ValueError("Qwen35LayoutAdapter requires non-empty layout_pages")
+            raise ValueError("QwenLayoutAdapter requires non-empty layout_pages")
 
         first_page = layout_pages[0]
         output_width = int(first_page.width or 1)
@@ -2701,11 +2699,19 @@ class Qwen35LayoutAdapter(LayoutAdapter):
                         )
                     )
 
+        raw_config = inference_result.raw_output.get("_config", {})
+        model_name = raw_config.get("model", "") if isinstance(raw_config, dict) else ""
+        layout_model = (
+            LayoutDetectionModel.QWEN3_8_LAYOUT
+            if isinstance(model_name, str) and model_name.startswith("qwen3.8")
+            else LayoutDetectionModel.QWEN3_5_LAYOUT
+        )
+
         return LayoutOutput(
             task_type="layout_detection",
             example_id=inference_result.request.example_id,
             pipeline_name=inference_result.pipeline_name,
-            model=LayoutDetectionModel.QWEN3_5_LAYOUT,
+            model=layout_model,
             image_width=max(output_width, 1),
             image_height=max(output_height, 1),
             predictions=predictions,
@@ -2920,9 +2926,7 @@ class KdlFrontierNanoLayoutAdapter(LayoutAdapter):
                     x1, y1 = seg.x * S, seg.y * S
                     x2, y2 = (seg.x + seg.w) * S, (seg.y + seg.h) * S
                     text = item.md or item.value or ""
-                    content = _build_docling_parse_content(
-                        "table" if str(label).lower() == "table" else "text", text
-                    )
+                    content = _build_docling_parse_content("table" if str(label).lower() == "table" else "text", text)
                     predictions.append(
                         LayoutPrediction(
                             bbox=[x1, y1, x2, y2],

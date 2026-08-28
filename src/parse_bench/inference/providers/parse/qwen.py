@@ -1,4 +1,4 @@
-"""Provider for Qwen3.5 Modal vLLM servers.
+"""Provider for Qwen multimodal models served by self-hosted vLLM servers.
 
 Qwen3.5 is a unified multimodal model family with built-in vision via early
 fusion. This provider supports two prompt modes:
@@ -121,15 +121,17 @@ class LayoutItem(BaseModel):
         return self.bbox_2d or self.bbox or [0, 0, 0, 0]
 
 
+@register_provider("qwen3_8")
 @register_provider("qwen3_5")
-class Qwen35Provider(Provider):
+class QwenProvider(Provider):
     """
-    Provider for Qwen3.5 vLLM servers on Modal.
+    Provider for Qwen3.x multimodal models served by vLLM.
 
     Configuration options:
-        - server_url (str, required): Modal server URL
+        - server_url (str, required): self-hosted vLLM server URL
         - model (str, default="qwen3.5-4b"): Served model name
         - prompt_mode (str, default="parse"): "parse" or "layout"
+        - enable_thinking (bool, default=False): Enable Qwen reasoning tokens
         - timeout (int, default=600): Request timeout in seconds
         - dpi (int, default=150): DPI for PDF to image conversion
         - max_tokens (int, default=16384): Max tokens per response
@@ -140,13 +142,18 @@ class Qwen35Provider(Provider):
     def __init__(self, provider_name: str, base_config: dict[str, Any] | None = None):
         super().__init__(provider_name, base_config)
 
-        server_url = self.base_config.get("server_url") or os.getenv("QWEN35_SERVER_URL")
+        server_url_env = self.base_config.get("server_url_env", "QWEN35_SERVER_URL")
+        server_url = self.base_config.get("server_url") or os.getenv(server_url_env)
         if not server_url:
-            raise ProviderConfigError("Qwen3.5 provider requires 'server_url' in config.")
+            raise ProviderConfigError(f"Qwen provider requires 'server_url' in config or {server_url_env}.")
         self._server_url: str = str(server_url)
 
         self._model = self.base_config.get("model", DEFAULT_SERVED_MODEL_NAME)
         self._prompt_mode = self.base_config.get("prompt_mode", "parse")
+        # Qwen3 reasoning: off unless a pipeline opts in. Send the boolean on
+        # every request so public self-hosted endpoints cannot change semantics
+        # through a different server-level default.
+        self._enable_thinking = bool(self.base_config.get("enable_thinking", False))
         self._timeout = self.base_config.get("timeout", 600)
         self._dpi = self.base_config.get("dpi", 150)
         self._max_tokens = self.base_config.get("max_tokens", 16384)
@@ -161,17 +168,19 @@ class Qwen35Provider(Provider):
     # Image helpers
     # ------------------------------------------------------------------
 
-    def _pdf_to_image_with_size(self, pdf_path: Path) -> tuple[bytes, int, int]:
+    def _pdf_to_images_with_size(self, pdf_path: Path) -> list[tuple[bytes, int, int]]:
         try:
             from pdf2image import convert_from_path
 
             images = convert_from_path(pdf_path, dpi=self._dpi)
             if not images:
                 raise ProviderPermanentError(f"No pages found in PDF: {pdf_path}")
-            img = images[0]
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue(), img.width, img.height
+            page_images: list[tuple[bytes, int, int]] = []
+            for img in images:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                page_images.append((buf.getvalue(), img.width, img.height))
+            return page_images
         except ImportError as e:
             raise ProviderPermanentError("pdf2image is required.") from e
         except ProviderPermanentError:
@@ -214,6 +223,7 @@ class Qwen35Provider(Provider):
             "max_tokens": self._max_tokens,
             "stream": False,
         }
+        payload["chat_template_kwargs"] = {"enable_thinking": self._enable_thinking}
 
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._api_key:
@@ -276,7 +286,7 @@ class Qwen35Provider(Provider):
                 pass
 
         for candidate in candidates:
-            repaired = Qwen35Provider._repair_json(candidate)
+            repaired = QwenProvider._repair_json(candidate)
             try:
                 return adapter.validate_json(repaired)
             except Exception:
@@ -333,9 +343,28 @@ class Qwen35Provider(Provider):
                 },
             }
 
+    async def _run_inference_pages_async(self, pages: list[tuple[bytes, int, int]]) -> dict[str, Any]:
+        """Run pages sequentially, retaining Qwen's existing ``pages`` contract."""
+        page_results = [await self._run_inference_async(*page) for page in pages]
+        if len(page_results) == 1:
+            return page_results[0]
+
+        raw_output = dict(page_results[0])
+        if self._prompt_mode == "layout":
+            raw_output["pages"] = [
+                {**result["pages"][0], "page_index": page_index} for page_index, result in enumerate(page_results)
+            ]
+        else:
+            raw_output.pop("markdown", None)
+            raw_output["pages"] = [
+                {"page_index": page_index, "markdown": result["markdown"]}
+                for page_index, result in enumerate(page_results)
+            ]
+        return raw_output
+
     def run_inference(self, pipeline: PipelineSpec, request: InferenceRequest) -> RawInferenceResult:
         if request.product_type != ProductType.PARSE:
-            raise ProviderPermanentError(f"Qwen35Provider only supports PARSE, got {request.product_type}")
+            raise ProviderPermanentError(f"QwenProvider only supports PARSE, got {request.product_type}")
 
         started_at = datetime.now()
 
@@ -345,16 +374,16 @@ class Qwen35Provider(Provider):
 
         suffix = file_path.suffix.lower()
         if suffix == ".pdf":
-            image_bytes, img_w, img_h = self._pdf_to_image_with_size(file_path)
+            image_pages = self._pdf_to_images_with_size(file_path)
         elif suffix in (".png", ".jpg", ".jpeg", ".webp", ".tiff", ".bmp"):
-            image_bytes, img_w, img_h = self._read_image_with_size(file_path)
+            image_pages = [self._read_image_with_size(file_path)]
         else:
             raise ProviderPermanentError(
                 f"Unsupported file type: {suffix}. Supported: .pdf, .png, .jpg, .jpeg, .webp, .tiff, .bmp"
             )
 
         try:
-            raw_output = asyncio.run(self._run_inference_async(image_bytes, img_w, img_h))
+            raw_output = asyncio.run(self._run_inference_pages_async(image_pages))
             completed_at = datetime.now()
             latency_ms = int((completed_at - started_at).total_seconds() * 1000)
 
@@ -386,6 +415,7 @@ class Qwen35Provider(Provider):
                 pipeline_name=pipeline.pipeline_name,
                 product_type=request.product_type,
                 raw_output={
+                    "prompt_mode": self._prompt_mode,
                     "markdown": "" if self._prompt_mode == "parse" else None,
                     "pages": [] if self._prompt_mode == "layout" else None,
                     "_error": error_msg,
@@ -464,9 +494,9 @@ class Qwen35Provider(Provider):
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
         if raw_result.product_type != ProductType.PARSE:
-            raise ProviderPermanentError(f"Qwen35Provider only supports PARSE, got {raw_result.product_type}")
+            raise ProviderPermanentError(f"QwenProvider only supports PARSE, got {raw_result.product_type}")
 
-        prompt_mode = raw_result.raw_output.get("prompt_mode", "parse")
+        prompt_mode = raw_result.raw_output.get("prompt_mode", self._prompt_mode)
 
         if prompt_mode == "layout":
             # Layout mode: reassemble markdown + build layout_pages
@@ -474,7 +504,7 @@ class Qwen35Provider(Provider):
             layout_pages: list[ParseLayoutPageIR] = []
             page_markdowns: list[str] = []
 
-            for page_data in raw_result.raw_output.get("pages", []):
+            for page_data in sorted(raw_result.raw_output.get("pages", []), key=lambda page: page.get("page_index", 0)):
                 page_index = page_data.get("page_index", 0)
                 img_width = page_data.get("width", 0)
                 img_height = page_data.get("height", 0)
@@ -497,7 +527,6 @@ class Qwen35Provider(Provider):
                     )
                     layout_pages.append(layout_page)
 
-            pages.sort(key=lambda p: p.page_index)
             full_markdown = "\n\n".join(page_markdowns)
 
             output = ParseOutput(
@@ -509,11 +538,16 @@ class Qwen35Provider(Provider):
                 markdown=full_markdown,
             )
         else:
-            # Parse mode: direct markdown with md-table-to-HTML conversion
-            markdown = raw_result.raw_output.get("markdown", "")
-            if markdown:
-                markdown = self._convert_md_tables_to_html(markdown)
-                markdown = self._sanitize_html_attributes(markdown)
+            # Parse mode: process every page when a multi-page PDF populated pages.
+            page_data = raw_result.raw_output.get("pages") or [raw_result.raw_output]
+            page_markdowns = []
+            for page in sorted(page_data, key=lambda item: item.get("page_index", 0)):
+                markdown = page.get("markdown") or ""
+                if markdown:
+                    markdown = self._convert_md_tables_to_html(markdown)
+                    markdown = self._sanitize_html_attributes(markdown)
+                page_markdowns.append(markdown)
+            markdown = "\n\n".join(page_markdowns)
 
             output = ParseOutput(
                 task_type="parse",
