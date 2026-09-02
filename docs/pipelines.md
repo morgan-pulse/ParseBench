@@ -67,6 +67,7 @@ These pipelines use hosted APIs. You only need an API key in your `.env` file.
 | **`anthropic_opus_4_8_parse_with_layout_file`** | Claude Opus 4.8, parse + layout, file mode (In paper: *Anthropic Opus 4.8*) | `ANTHROPIC_API_KEY` |
 | `anthropic_sonnet_5_parse_with_layout_file` | Claude Sonnet 5, adaptive thinking + layout, file mode | `ANTHROPIC_API_KEY` |
 | `anthropic_fable_5_parse_with_layout_file` | Claude Fable 5, parse + layout, file mode | `ANTHROPIC_API_KEY` |
+| `anthropic_fable_5_1_parse_with_layout_file` | Claude Fable 5.1, parse + layout, file mode | `ANTHROPIC_API_KEY` |
 
 ### Google Gemini
 
@@ -131,6 +132,7 @@ These pipelines use hosted APIs. You only need an API key in your `.env` file.
 |---|---|---|
 | **`reducto`** | Default Reducto (In paper: *Reducto*) | `REDUCTO_API_KEY` |
 | **`reducto_agentic`** | Agentic mode (In paper: *Reducto (Agentic)*) | `REDUCTO_API_KEY` |
+| **`reducto_r1`** | r-1 model, `settings.model="r-1"` (In paper: *Reducto (r-1)*) | `REDUCTO_API_KEY` |
 
 ### Pulse
 
@@ -286,6 +288,14 @@ Fine-tune of KDL-Frontier-Parser-nano ([florin-inc/florin-parser-nano](https://h
 | Pipeline | Description | Env Var |
 |---|---|---|
 | `florin_parser_nano` | vLLM OpenAI-compatible endpoint (layout + per-region recognition) | `FLORIN_NANO_ENDPOINT_URL` |
+
+### rakedoc-nano
+
+Fine-tune of florin-parser-nano ([cloudraker/rakedoc-nano](https://huggingface.co/cloudraker/rakedoc-nano)); served identically to the parent models and driven by the same two-stage pipeline and markdown emission (see the provider module docstring for the exact `vllm serve` command).
+
+| Pipeline | Description | Env Var |
+|---|---|---|
+| `rakedoc_nano` | vLLM OpenAI-compatible endpoint (layout + per-region recognition) | `RAKEDOC_NANO_ENDPOINT_URL` |
 
 ---
 

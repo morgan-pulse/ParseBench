@@ -1110,6 +1110,20 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
         )
     )
 
+    register_fn(
+        PipelineSpec(
+            pipeline_name="reducto_r1",
+            provider_name="reducto",
+            product_type=ProductType.PARSE,
+            config={
+                "ocr_system": "standard",
+                "agentic": False,
+                "table_output_format": "html",
+                "model": "r-1",
+            },
+        )
+    )
+
     # =========================================================================
     # DeepSeek-OCR-2
     # =========================================================================
@@ -2063,6 +2077,20 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
         )
     )
 
+    # Anthropic Fable 5.1 - Parse with Layout File
+    register_fn(
+        PipelineSpec(
+            pipeline_name="anthropic_fable_5_1_parse_with_layout_file",
+            provider_name="anthropic",
+            product_type=ProductType.PARSE,
+            config={
+                "model": "claude-fable-5-1",
+                "max_tokens": 32768,
+                "mode": "parse_with_layout_file",
+            },
+        )
+    )
+
     # Anthropic Haiku - Parse with Layout File - Thinking
     register_fn(
         PipelineSpec(
@@ -2126,6 +2154,25 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
             config={
                 "endpoint_url": "",  # via FLORIN_NANO_ENDPOINT_URL
                 "model": "",  # via FLORIN_NANO_MODEL (default florin-parser-nano)
+                "dpi": 144,
+                "timeout": 900,
+            },
+        )
+    )
+
+    # =========================================================================
+    # rakedoc-nano (cloudraker/rakedoc-nano, fine-tune of
+    # florin-inc/florin-parser-nano; same serving requirements)
+    # =========================================================================
+
+    register_fn(
+        PipelineSpec(
+            pipeline_name="rakedoc_nano",
+            provider_name="rakedoc_nano",
+            product_type=ProductType.PARSE,
+            config={
+                "endpoint_url": "",  # via RAKEDOC_NANO_ENDPOINT_URL
+                "model": "",  # via RAKEDOC_NANO_MODEL (default rakedoc-nano)
                 "dpi": 144,
                 "timeout": 900,
             },
