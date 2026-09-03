@@ -245,20 +245,34 @@ def register_parse_pipelines(register_fn) -> None:  # type: ignore[no-untyped-de
         "poll_interval": 1.0,
     }
     pulse_ultra_2_image_prompt = (
-        "For ParseBench charts, output a markdown table where each row is one data point. "
+        "For charts and plots, output a markdown table where each row is one data point. "
         "Include every visible chart label needed to identify the value as explicit row or column text, "
-        "including series names, legend labels, axis labels, sign/category labels such as "
-        "Favorable attitude or Unfavorable attitude, units, and years. Do not leave grouping labels only in prose."
+        "including series names, legend labels, axis labels, category or sign labels, units, "
+        "and years. Do not leave grouping labels only in prose."
     )
-    pulse_ultra_2_prompt = "Preserve chart captions, title hierarchy, table structure, and semantic formatting."
+    pulse_ultra_2_prompt = (
+        "Preserve chart captions, title hierarchy, table structure, and semantic formatting. "
+        "Carry inline styling into the markdown: **bold**, *italic*, <u>underline</u>, "
+        "~~strikethrough~~, <sup>superscript</sup>, <sub>subscript</sub>, <mark>highlight</mark>, "
+        "and heading levels (#, ##, ###) that match the visual hierarchy."
+    )
+    pulse_ultra_2_refine_prompt = (
+        "Preserve every inline formatting cue that is visually present in the source page image, "
+        "using exactly these syntaxes: **bold**, *italic*, <u>underline</u>, ~~strikethrough~~, "
+        "<sup>superscript</sup>, <sub>subscript</sub>, <mark>highlighted</mark>, and fenced code "
+        "blocks for monospaced code. Match markdown heading levels (#, ##, ###) to the visual "
+        "heading hierarchy on the page. Apply a formatting mark only where it is visible in the "
+        "image; never add emphasis that is not there."
+    )
     pulse_ultra_2_config = {
         "model": "pulse-ultra-2",
-        "credits_per_page": 10,
+        "credits_per_page": 1,
         "refine": True,
         "extract_figure": True,
         "figure_description": True,
         "additional_prompt": pulse_ultra_2_prompt,
         "custom_image_prompt": pulse_ultra_2_image_prompt,
+        "custom_refine_prompt": pulse_ultra_2_refine_prompt,
         **pulse_common_endpoint_config,
     }
 
