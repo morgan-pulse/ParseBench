@@ -59,7 +59,6 @@ uv run extract-bench run <pipeline_name>
 | `qwen3_5_4b_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Qwen3.5-4B, json_object mode; requires `QWEN3_5_4B_SERVER_URL` |
 | `nuextract3_extract` | Self-hosted vLLM | schema converted to a NuExtract template; requires `NUEXTRACT3_SERVER_URL` |
 
-
 ## Parse Pipelines
 
 Parse pipelines (inherited from ParseBench, used here by the two-stage extract
