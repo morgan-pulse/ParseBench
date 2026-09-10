@@ -75,7 +75,6 @@ def test_registered_pipelines_match_submitted_modes() -> None:
         assert pipeline.config["extensions"] == {"altOutputs": {"wlbb": True}}
         assert pipeline.config["schema_prompt"] == _PROMPT
         assert pipeline.config["async_run"] is True
-        assert pipeline.config["adapt_schema"] is False
         assert pipeline.config["include_extract_cost_in_total"] is False
         assert pipeline.config["schema_terminal_retries"] == 1
         assert pipeline.config["run_timeout"] == 21000

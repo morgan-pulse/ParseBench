@@ -52,7 +52,6 @@ _RETRYABLE_SCHEMA_TERMINAL_ACTIONS = (
     "retry the request",
     "please resubmit the request",
 )
-_UNSUPPORTED_SCHEMA_KEYS = {"$defs", "$schema", "definitions", "default", "repeated_structure"}
 
 
 @dataclass
@@ -125,7 +124,6 @@ class PulseExtractProvider(Provider):
         self._schema_terminal_retries = int(self.base_config.get("schema_terminal_retries", 0))
         self._schema_retry_interval = float(self.base_config.get("schema_retry_interval", 5.0))
         self._async_run = bool(self.base_config.get("async_run", self.base_config.get("async", False)))
-        self._adapt_schema = bool(self.base_config.get("adapt_schema", True))
         self._schema_prompt: str | None = self.base_config.get("schema_prompt")
         self._schema_effort = bool(self.base_config.get("effort", self.base_config.get("schema_effort", False)))
         self._estimate_schema_cost = bool(self.base_config.get("estimate_schema_cost", True))
@@ -152,11 +150,6 @@ class PulseExtractProvider(Provider):
         self._inflight_lock = threading.Lock()
         self._attempts: dict[str, _AttemptControl] = {}
         self._inflight_jobs: dict[str, tuple[_AttemptControl, str]] = {}
-
-        figure_processing = self.base_config.get("figure_processing")
-        if figure_processing is not None and not isinstance(figure_processing, dict):
-            raise ProviderConfigError("figure_processing must be a dict")
-        self._figure_processing: dict[str, Any] | None = figure_processing
 
         extensions = self.base_config.get("extensions")
         if extensions is not None and not isinstance(extensions, dict):
@@ -716,7 +709,6 @@ class PulseExtractProvider(Provider):
         add("model", self._model)
         add("pages", self._pages)
         add("async", self._async_run or None)
-        add("figure_processing", self._figure_processing)
         add("extensions", self._extensions)
         return fields
 
@@ -765,7 +757,7 @@ class PulseExtractProvider(Provider):
         control: _AttemptControl,
     ) -> dict[str, Any]:
         schema_config: dict[str, Any] = {
-            "input_schema": _adapt_schema_for_pulse(schema) if self._adapt_schema else schema,
+            "input_schema": schema,
             "effort": self._schema_effort,
         }
         if self._schema_prompt is not None:
@@ -888,14 +880,12 @@ class PulseExtractProvider(Provider):
             "_config": {
                 "model": self._model,
                 "pages": self._pages,
-                "figure_processing": self._figure_processing,
                 "extensions": self._extensions,
                 "schema_prompt": self._schema_prompt,
                 "effort": self._schema_effort,
                 "estimate_schema_cost": self._estimate_schema_cost,
                 "include_extract_cost_in_total": self._include_extract_cost_in_total,
                 "async_run": self._async_run,
-                "adapt_schema": self._adapt_schema,
                 "request_timeout": self._request_timeout,
                 "job_timeout": self._job_timeout,
                 "run_timeout": self._run_timeout,
@@ -990,147 +980,6 @@ def _content_type_for_path(path: Path) -> str:
     if suffix in {".xlsx", ".xlsm", ".xls"}:
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     return "application/octet-stream"
-
-
-def _adapt_schema_for_pulse(schema: Any) -> Any:
-    """Normalize benchmark JSON Schema to the subset Pulse strict mode accepts.
-
-    Pulse follows JSON Schema, but its strict-mode validator currently rejects
-    slash/quote literals in places the model may need to reproduce. Keep the
-    extraction shape intact while removing unsupported description characters,
-    inlining local refs, collapsing nullable unions, and dropping unsupported
-    schema metadata/defaults.
-    """
-    if not isinstance(schema, Mapping):
-        if isinstance(schema, list):
-            return [_adapt_schema_for_pulse(item) for item in schema]
-        return schema
-
-    schema = _promote_repeated_structure(dict(schema))
-
-    def resolve_json_pointer(ref: str) -> Mapping[str, Any] | None:
-        if not ref.startswith("#/"):
-            return None
-        current: Any = schema
-        for raw_part in ref[2:].split("/"):
-            part = raw_part.replace("~1", "/").replace("~0", "~")
-            if not isinstance(current, Mapping):
-                return None
-            current = current.get(part)
-        return current if isinstance(current, Mapping) else None
-
-    def is_null_schema(node: Any) -> bool:
-        return isinstance(node, Mapping) and node.get("type") == "null"
-
-    def resolve_ref_node(node: Mapping[str, Any]) -> dict[str, Any]:
-        ref = node.get("$ref")
-        if isinstance(ref, str):
-            resolved = resolve_json_pointer(ref)
-            if resolved is not None:
-                merged = dict(resolved)
-                for key, value in node.items():
-                    if key != "$ref":
-                        merged[key] = value
-                return merged
-        return dict(node)
-
-    def normalize_nullable_schema(node: Mapping[str, Any]) -> dict[str, Any]:
-        node = dict(node)
-        node_type = node.get("type")
-        if isinstance(node_type, list):
-            non_null_types = [value for value in node_type if value != "null"]
-            if len(non_null_types) == 1:
-                node["type"] = non_null_types[0]
-
-        for union_key in ("anyOf", "oneOf"):
-            options = node.get(union_key)
-            if not isinstance(options, list):
-                continue
-            non_null_options = [option for option in options if not is_null_schema(option)]
-            if len(non_null_options) != 1 or len(non_null_options) == len(options):
-                continue
-
-            result = dict(non_null_options[0])
-            for key, value in node.items():
-                if key != union_key and key not in result:
-                    result[key] = value
-            return result
-        return node
-
-    def adapt_node(node: Any) -> Any:
-        if isinstance(node, Mapping):
-            node = resolve_ref_node(node)
-            node = normalize_nullable_schema(node)
-            node = resolve_ref_node(node)
-
-            out: dict[str, Any] = {}
-            enum_values = node.get("enum")
-            strip_enum = _has_pulse_unsafe_enum_literal(enum_values)
-            for key, value in node.items():
-                if key in _UNSUPPORTED_SCHEMA_KEYS:
-                    continue
-                if key == "$ref":
-                    continue
-                if key == "enum" and strip_enum:
-                    continue
-                if key == "description" and strip_enum and isinstance(value, str):
-                    out[key] = _sanitize_pulse_description(
-                        f"{value} Allowed values: {_format_enum_values(enum_values)}."
-                    )
-                elif key == "description" and isinstance(value, str):
-                    out[key] = _sanitize_pulse_description(value)
-                else:
-                    out[key] = adapt_node(value)
-
-            if strip_enum and "description" not in out:
-                out["description"] = _sanitize_pulse_description(f"Allowed values: {_format_enum_values(enum_values)}.")
-            return out
-        if isinstance(node, list):
-            return [adapt_node(item) for item in node]
-        return node
-
-    return adapt_node(schema)
-
-
-def _promote_repeated_structure(schema: dict[str, Any]) -> dict[str, Any]:
-    repeated_structure = schema.get("repeated_structure")
-    if not isinstance(repeated_structure, Mapping):
-        return schema
-
-    out = dict(schema)
-    properties = dict(out.get("properties") or {})
-    for name, definition in repeated_structure.items():
-        if isinstance(definition, Mapping) and name not in properties:
-            properties[name] = dict(definition)
-    out["properties"] = properties
-    return out
-
-
-def _has_pulse_unsafe_enum_literal(enum_values: Any) -> bool:
-    if not isinstance(enum_values, Sequence) or isinstance(enum_values, (str, bytes, bytearray)):
-        return False
-    return any(isinstance(value, str) and any(char in value for char in ('"', "'", "/")) for value in enum_values)
-
-
-def _format_enum_values(enum_values: Any) -> str:
-    if not isinstance(enum_values, Sequence) or isinstance(enum_values, (str, bytes, bytearray)):
-        return ""
-    return ", ".join("null" if value is None else str(value) for value in enum_values)
-
-
-def _sanitize_pulse_description(description: str) -> str:
-    translation = str.maketrans(
-        {
-            '"': "",
-            "'": "",
-            "/": " or ",
-            "\u2018": "",
-            "\u2019": "",
-            "\u201c": "",
-            "\u201d": "",
-        }
-    )
-    return " ".join(description.translate(translation).split())
 
 
 def _is_retryable_schema_terminal_error(exc: ProviderPermanentError) -> bool:
