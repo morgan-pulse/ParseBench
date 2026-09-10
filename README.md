@@ -24,18 +24,18 @@ Models and prices reflect each provider's official documentation as of July 1, 2
 
 | Rank | Provider | Category | Overall | Short | Medium | Long | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | LlamaExtract Agentic Plus | LlamaExtract | **95.59** | <u>96.56</u> | **93.34** | **94.41** | 8.11¢ |
-| 2 | Codex (GPT-5.5) | Coding Agents | <u>93.57</u> | 95.68 | <u>91.15</u> | 78.88 | 27.83¢ |
-| 3 | OpenAI GPT-6 Astra | Commercial VLM | 91.91 | **97.22** | 90.56 | 31.70 | 11.09¢ |
-| 4 | Reducto Deep Extract | Specialized APIs | 90.44 | 94.20 | 80.47 | <u>92.01</u> | 34.44¢ |
-| 5 | Qwen3.8 Flash Next | OSS | 89.88 | 94.82 | 87.81 | 37.74 | — |
-| 6 | Qwen3.8 27B | OSS | 89.75 | 94.68 | 87.54 | 38.45 | — |
-| 7 | LlamaExtract Agentic | LlamaExtract | 89.55 | 92.03 | 85.41 | 78.62 | 3.12¢ |
-| 8 | Extend (Max Context) | Specialized APIs | 88.62 | 92.32 | 78.75 | 90.46 | 10.00¢ |
-| 9 | Qwen3.6 35B | OSS | 88.11 | 92.86 | 86.37 | 36.90 | — |
-| 10 | Qwen3.5 35B | OSS | 88.00 | 93.52 | 85.27 | 31.73 | — |
+| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 9.00¢ |
+| 2 | LlamaExtract Agentic Plus | LlamaExtract | <u>95.59</u> | <u>96.56</u> | <u>93.34</u> | **94.41** | 8.11¢ |
+| 3 | Codex (GPT-5.5) | Coding Agents | 93.57 | 95.68 | 91.15 | 78.88 | 27.83¢ |
+| 4 | OpenAI GPT-6 Astra | Commercial VLM | 91.91 | **97.22** | 90.56 | 31.70 | 11.09¢ |
+| 5 | Pulse (Non-effort) | Specialized APIs | 91.54 | 92.62 | 91.69 | 77.12 | 1.50¢ |
+| 6 | Reducto Deep Extract | Specialized APIs | 90.44 | 94.20 | 80.47 | 92.01 | 34.44¢ |
+| 7 | Qwen3.8 Flash Next | OSS | 89.88 | 94.82 | 87.81 | 37.74 | — |
+| 8 | Qwen3.8 27B | OSS | 89.75 | 94.68 | 87.54 | 38.45 | — |
+| 9 | LlamaExtract Agentic | LlamaExtract | 89.55 | 92.03 | 85.41 | 78.62 | 3.12¢ |
+| 10 | Extend (Max Context) | Specialized APIs | 88.62 | 92.32 | 78.75 | 90.46 | 10.00¢ |
 
-Top 10 of 36 systems — full table in [leaderboard.csv](leaderboard.csv).
+Top 10 of 38 systems — full table in [leaderboard.csv](leaderboard.csv).
 <!-- LEADERBOARD:END -->
 
 <!-- GROUNDING:START -->
@@ -54,7 +54,7 @@ Top 10 of 36 systems — full table in [leaderboard.csv](leaderboard.csv).
     <tr><td align="right">5</td><td>Extend (Max Context)</td><td align="right">25.20</td><td align="right">33.93</td><td align="right">0.21</td><td align="right">0.02</td><td align="right">49.04</td><td align="right">61.71</td><td align="right">27.68</td><td align="right">0.03</td></tr>
     <tr><td align="right">6</td><td>Extend Extract</td><td align="right">15.96</td><td align="right">21.13</td><td align="right">1.03</td><td align="right">0.01</td><td align="right">53.58</td><td align="right">64.50</td><td align="right">37.39</td><td align="right">0.03</td></tr>
     <tr><td align="right">7</td><td>Datalab (Accurate + Balanced)</td><td align="right">2.02</td><td align="right">2.67</td><td align="right">0.24</td><td align="right">0.00</td><td align="right">48.50</td><td align="right">56.90</td><td align="right">38.55</td><td align="right">0.01</td></tr>
-    <tr><td align="right">—</td><td><em>All 29 other systems</em></td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td></tr>
+    <tr><td align="right">—</td><td><em>All 31 other systems</em></td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td></tr>
   </tbody>
 </table>
 <!-- GROUNDING:END -->
