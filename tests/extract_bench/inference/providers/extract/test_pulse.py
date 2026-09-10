@@ -240,14 +240,9 @@ def test_submission_transport_failure_is_not_replayed(
 @pytest.mark.parametrize(
     "terminal_error",
     [
-        (
-            "Schema processing produced no output. Retry the request; "
-            "if it persists, check the schema against the document."
-        ),
-        (
-            "Background worker terminated before the job completed (likely out-of-memory or pod restart). "
-            "No partial result was saved — please resubmit the request."
-        ),
+        "Temporary schema failure. Retry later.",
+        "Temporary schema failure. Retry the request.",
+        "Temporary schema failure. Please resubmit the request.",
     ],
 )
 def test_known_terminal_schema_failure_retries_schema_only(
@@ -429,7 +424,6 @@ def test_anchor_index_covers_all_block_categories_and_never_invents_page() -> No
         "Header": [
             {"id": "txt-no-page", "bounding_box": [0.1, 0.1, 0.2, 0.2]},
         ],
-        # Actual WLBB payloads may omit word IDs. They must not be guessed.
         "Words": [{"text": "Invoice", "page": 1, "bounding_box": [0.1, 0.1, 0.2, 0.2]}],
     }
 

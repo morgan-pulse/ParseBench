@@ -47,13 +47,10 @@ _DEFAULT_RUN_TIMEOUT_SECONDS = 21_000.0
 _POLL_RETRYABLE_STATUS_CODES = {404, 429, 500, 502, 503, 504}
 _JOB_SUCCESS_STATUSES = {"completed", "complete", "done"}
 _JOB_FAILURE_STATUSES = {"failed", "error", "canceled", "cancelled", "expired"}
-_RETRYABLE_SCHEMA_TERMINAL_ERROR_SIGNATURES = (
-    ("sandbox unavailable; retry later",),
-    ("schema processing produced no output",),
-    (
-        "background worker terminated before the job completed",
-        "no partial result was saved",
-    ),
+_RETRYABLE_SCHEMA_TERMINAL_ACTIONS = (
+    "retry later",
+    "retry the request",
+    "please resubmit the request",
 )
 _UNSUPPORTED_SCHEMA_KEYS = {"$defs", "$schema", "definitions", "default", "repeated_structure"}
 
@@ -948,8 +945,6 @@ class PulseExtractProvider(Provider):
                 f"PulseExtractProvider only supports EXTRACT product type, got {raw_result.product_type}"
             )
 
-        # Keep pricing available when old raw artifacts are re-normalized after
-        # a pricing/parser correction.
         _apply_usage_cost_fields(raw_result.raw_output)
         schema_output = _as_mapping(_as_mapping(raw_result.raw_output.get("schema")).get("schema_output"))
         values = schema_output.get("values", {})
@@ -1146,9 +1141,7 @@ def _is_retryable_schema_terminal_error(exc: ProviderPermanentError) -> bool:
     if debug.get("context") != "schema" or status not in _JOB_FAILURE_STATUSES:
         return False
     error = str(state.get("error") or state.get("error_message") or "").lower()
-    return any(
-        all(fragment in error for fragment in signature) for signature in _RETRYABLE_SCHEMA_TERMINAL_ERROR_SIGNATURES
-    )
+    return any(action in error for action in _RETRYABLE_SCHEMA_TERMINAL_ACTIONS)
 
 
 def _apply_usage_cost_fields(raw_output: dict[str, Any]) -> None:
@@ -1157,9 +1150,6 @@ def _apply_usage_cost_fields(raw_output: dict[str, Any]) -> None:
 
     page_count = _coerce_float(extract.get("page_count"))
     plan_info = _as_mapping(extract.get("plan_info") or extract.get("plan-info"))
-    # Modern responses report this document's pages in page_count. Legacy
-    # plan_info.pages_used may be cumulative account usage, so it is fallback
-    # metadata only and must never override page_count.
     pages_used = page_count
     if pages_used is None:
         pages_used = _coerce_float(plan_info.get("pages_used"))
@@ -1171,7 +1161,6 @@ def _apply_usage_cost_fields(raw_output: dict[str, Any]) -> None:
     extract_credits_estimated = False
     schema_credits_estimated = False
     if extract_credits is None and pages_used is not None:
-        # /extract is one credit per page; WLBB does not add a documented fee.
         extract_credits = pages_used
         extract_credits_estimated = True
     if schema_credits is None and pages_used is not None and estimate_schema_cost and config.get("effort"):
@@ -1218,9 +1207,6 @@ def _build_pulse_anchor_index(bounding_boxes: Any) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     boxes = _as_mapping(bounding_boxes)
 
-    # PDF table cells commonly omit an explicit id. Schema citations derive
-    # one from the owning table and zero-based cell position, so mirror that
-    # public anchor format here before the general recursive pass.
     for table in _as_sequence(boxes.get("Tables")):
         table = _as_mapping(table)
         table_id = _as_mapping(table.get("table_info")).get("id")
@@ -1238,10 +1224,6 @@ def _build_pulse_anchor_index(bounding_boxes: Any) -> dict[str, dict[str, Any]]:
                     fallback_anchor=f"{table_id}-r{row}c{column}",
                 )
 
-    # Text anchors are grouped under Text, Title, Header, Footer, List Items,
-    # captions, and other forward-compatible label arrays. Recursing the typed
-    # payload also reaches Tables[].table_info and Tables[].cell_data without
-    # maintaining a brittle allow-list of labels.
     def visit(node: Any) -> None:
         if isinstance(node, Mapping):
             _register_pulse_anchor(index, node)
@@ -1304,10 +1286,6 @@ def _resolve_pulse_citation_anchors(node: Any, index: dict[str, dict[str, Any]])
         if exact is not None:
             return dict(exact)
 
-        # A scalar field can cite several source regions in one comma-separated
-        # string (for example ``tbl-1-r8c0, tbl-1-r8c1``). Preserve those as
-        # several citations for the same field rather than treating the whole
-        # string as one unknown anchor or turning it into array-indexed fields.
         anchor_boxes = [dict(index[anchor]) for part in node.split(",") if (anchor := part.strip()) and anchor in index]
         if not anchor_boxes:
             return None
