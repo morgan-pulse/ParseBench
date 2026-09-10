@@ -383,6 +383,9 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
         ),
         "async_run": True,
         "adapt_schema": False,
+        # Leaderboard pricing reports the schema rebuild only; extraction
+        # usage remains available as separate provider metadata.
+        "include_extract_cost_in_total": False,
         "request_timeout": 900.0,
         "job_timeout": 7200.0,
         "capacity_retry_timeout": 14400.0,

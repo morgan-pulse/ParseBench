@@ -17,17 +17,17 @@ The benchmark covers **370 documents (4,869 pages)** across 8 business domains a
 
 ## Leaderboard
 
-Models and prices reflect each provider's official documentation when its row was added; each system uses its recommended configuration.
+Models and prices reflect each provider's official documentation as of September 10, 2026; each system uses its recommended configuration.
 
 <!-- LEADERBOARD:START -->
 **Unified value F1** — the headline metric. Every score is an unweighted mean over documents; each document counts once, whatever its length. For raw data including per-split precision and recall, cost, and latency, see [leaderboard.csv](leaderboard.csv). The best score in each Overall, Short, Medium, and Long column is **bold**; the second-best distinct score is <u>underlined</u>.
 
 | Rank | Provider | Category | Overall | Short | Medium | Long | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 10.50¢ |
+| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 9.00¢ |
 | 2 | LlamaExtract Agentic Plus | LlamaExtract | <u>95.59</u> | <u>96.56</u> | <u>93.34</u> | **94.41** | 8.11¢ |
 | 3 | Codex (GPT-5.5) | Coding Agents | 93.57 | 95.68 | 91.15 | 78.88 | 27.83¢ |
-| 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 3.00¢ |
+| 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 1.50¢ |
 | 5 | OpenAI GPT-6 Astra | Commercial VLM | 91.91 | **97.22** | 90.56 | 31.70 | 11.09¢ |
 | 6 | Reducto Deep Extract | Specialized APIs | 90.44 | 94.20 | 80.47 | 92.01 | 34.44¢ |
 | 7 | Qwen3.8 Flash Next | OSS | 89.88 | 94.82 | 87.81 | 37.74 | — |
