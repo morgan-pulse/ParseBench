@@ -59,21 +59,6 @@ uv run extract-bench run <pipeline_name>
 | `qwen3_5_4b_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Qwen3.5-4B, json_object mode; requires `QWEN3_5_4B_SERVER_URL` |
 | `nuextract3_extract` | Self-hosted vLLM | schema converted to a NuExtract template; requires `NUEXTRACT3_SERVER_URL` |
 
-The Pulse extract pipelines intentionally omit the `/extract` `model` field to
-match the submitted run. That run's organization resolved its default route to
-Pulse Ultra 2; an organization pinned to another default will not reproduce the
-same configuration. Both pipelines send the benchmark schema unchanged, use
-the prompt `Extract the document into the provided JSON schema. Use only
-information present in the document.`, and run both `/extract` and `/schema`
-as asynchronous jobs. A known retryable terminal schema failure gets one new
-schema job against the same extraction; ambiguous submissions are never
-replayed. A shared 21,000-second provider deadline covers extraction, schema,
-retries, polling, and result downloads, leaving ten minutes for cancellation
-before the runner's 21,600-second watchdog. See the Pulse
-[extract](https://docs.runpulse.com/api-reference/endpoint/extract),
-[schema](https://docs.runpulse.com/api-reference/endpoint/schema), and
-[credit usage](https://docs.runpulse.com/api-reference/introduction#credit-usage)
-documentation.
 
 ## Parse Pipelines
 
