@@ -37,6 +37,7 @@ uv run extract-bench run <pipeline_name>
 | `extend_extract` / `extend_extract_max` | Extend | citations enabled; max-context array strategy variant |
 | `landingai_extract` | LandingAI ADE | |
 | `datalab_parse_accurate_extract_fast` / `_balanced` | Datalab | accurate parse + fast or balanced extraction, JSON tree citations |
+| `pulse_extract_non_effort` / `pulse_extract_effort` | Pulse | default extraction route (model omitted), WLBB enabled, then `/schema` with effort off/on (`PULSE_API_KEY`) |
 | `lift_extract` | Self-hosted lift SDK | requires `LIFT_ENDPOINT_URL` |
 | `qwen3_6_35b_a3b_fp8_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Qwen3.6-35B-A3B-FP8, json_object mode; requires `QWEN35_SERVER_URL` |
 | `gemma4_26b_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Gemma-4-26B-A4B, json_object mode; requires `GEMMA4_SERVER_URL` |
@@ -57,6 +58,22 @@ uv run extract-bench run <pipeline_name>
 | `gemma4_12b_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Gemma-4-12B, json_object mode; requires `GEMMA4_12B_SERVER_URL` |
 | `qwen3_5_4b_vllm_extract_oneshot_structured_output_file` | Self-hosted vLLM | Qwen3.5-4B, json_object mode; requires `QWEN3_5_4B_SERVER_URL` |
 | `nuextract3_extract` | Self-hosted vLLM | schema converted to a NuExtract template; requires `NUEXTRACT3_SERVER_URL` |
+
+The Pulse extract pipelines intentionally omit the `/extract` `model` field to
+match the submitted run. That run's organization resolved its default route to
+Pulse Ultra 2; an organization pinned to another default will not reproduce the
+same configuration. Both pipelines send the benchmark schema unchanged, use
+the prompt `Extract the document into the provided JSON schema. Use only
+information present in the document.`, and run both `/extract` and `/schema`
+as asynchronous jobs. A known retryable terminal schema failure gets one new
+schema job against the same extraction; ambiguous submissions are never
+replayed. A shared 21,000-second provider deadline covers extraction, schema,
+retries, polling, and result downloads, leaving ten minutes for cancellation
+before the runner's 21,600-second watchdog. See the Pulse
+[extract](https://docs.runpulse.com/api-reference/endpoint/extract),
+[schema](https://docs.runpulse.com/api-reference/endpoint/schema), and
+[credit usage](https://docs.runpulse.com/api-reference/introduction#credit-usage)
+documentation.
 
 ## Parse Pipelines
 

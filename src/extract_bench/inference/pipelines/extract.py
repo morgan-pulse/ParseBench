@@ -371,6 +371,40 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
             )
         )
 
+    # Pulse's submitted benchmark used the account's default extraction route,
+    # with no model multipart field, and opted into word-level boxes. On that
+    # account the default route resolves to Pulse Ultra 2. The prompt and raw
+    # schema settings match the published run rather than relying on provider
+    # defaults or the provider's legacy schema adapter.
+    pulse_extract_common = {
+        "extensions": {"altOutputs": {"wlbb": True}},
+        "schema_prompt": (
+            "Extract the document into the provided JSON schema. Use only information present in the document."
+        ),
+        "async_run": True,
+        "adapt_schema": False,
+        "request_timeout": 900.0,
+        "job_timeout": 7200.0,
+        "capacity_retry_timeout": 14400.0,
+        # Leave ten minutes for runner cancellation before its watchdog retry.
+        "run_timeout": 21000.0,
+        "poll_interval": 5.0,
+        "poll_max_interval": 30.0,
+        # Match the submitted run's repair protocol without repeating /extract:
+        # only explicit, known-retryable terminal schema failures qualify.
+        "schema_terminal_retries": 1,
+        "schema_retry_interval": 5.0,
+    }
+    for _mode, _effort in (("non_effort", False), ("effort", True)):
+        register_fn(
+            _pipeline_spec(
+                pipeline_name=f"pulse_extract_{_mode}",
+                provider_name="pulse_extract",
+                config={**pulse_extract_common, "effort": _effort},
+                per_file_timeout=21600.0,
+            )
+        )
+
     # =========================================================================
     # Open-weight pipelines (self-hosted)
     # =========================================================================
