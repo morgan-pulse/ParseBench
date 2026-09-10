@@ -65,8 +65,8 @@ def _request(source: Path, schema: dict[str, Any]) -> InferenceRequest:
 
 
 def test_registered_pipelines_match_submitted_modes() -> None:
-    non_effort = get_pipeline("pulse_extract_non_effort")
-    effort = get_pipeline("pulse_extract_effort")
+    non_effort = get_pipeline("pulse_schema_non_effort")
+    effort = get_pipeline("pulse_schema_effort")
 
     for pipeline in (non_effort, effort):
         assert pipeline.provider_name == "pulse_extract"
@@ -97,7 +97,7 @@ def test_async_pipeline_omits_model_and_polls_accepted_jobs_without_resubmitting
             "title": {"type": "string", "description": "Keep / punctuation"},
         },
     }
-    pipeline = get_pipeline("pulse_extract_non_effort")
+    pipeline = get_pipeline("pulse_schema_non_effort")
     provider = _provider(
         {
             **pipeline.config,
@@ -251,7 +251,7 @@ def test_known_terminal_schema_failure_retries_schema_only(
 ) -> None:
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"%PDF-1.4\n")
-    pipeline = get_pipeline("pulse_extract_effort")
+    pipeline = get_pipeline("pulse_schema_effort")
     provider = _provider(
         {
             **pipeline.config,

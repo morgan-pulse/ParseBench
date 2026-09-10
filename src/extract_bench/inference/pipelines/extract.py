@@ -371,7 +371,7 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
             )
         )
 
-    pulse_extract_common = {
+    pulse_schema_common = {
         "extensions": {"altOutputs": {"wlbb": True}},
         "schema_prompt": (
             "Extract the document into the provided JSON schema. Use only information present in the document."
@@ -390,9 +390,9 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
     for _mode, _effort in (("non_effort", False), ("effort", True)):
         register_fn(
             _pipeline_spec(
-                pipeline_name=f"pulse_extract_{_mode}",
+                pipeline_name=f"pulse_schema_{_mode}",
                 provider_name="pulse_extract",
-                config={**pulse_extract_common, "effort": _effort},
+                config={**pulse_schema_common, "effort": _effort},
                 per_file_timeout=21600.0,
             )
         )
