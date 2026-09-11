@@ -13,8 +13,6 @@ from rapidfuzz import fuzz
 from scipy.optimize import linear_sum_assignment
 
 from extract_bench.evaluation.metrics.extract.json_subset_match import (
-    _is_nullable_numeric_field,
-    _normalize_nullable_numeric,
     normalize_date_string,
 )
 from extract_bench.inference.providers.extract.table_codegen.schema_utils import (
@@ -46,6 +44,10 @@ DEFAULT_FUZZY_FIELD_THRESHOLDS: dict[str, float] = {
     "description": 0.95,
     "court": 0.85,
 }
+
+# Intern / Hungarian column id: a JSON key on a raw row (`str`) or a flattened
+# pairing path (`tuple[str, ...]`). A singleton tuple is not a JSON key.
+type CellKey = str | tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -117,12 +119,12 @@ def normalize_ws(value: str) -> str:
     return _WS_RE.sub(" ", value).strip()
 
 
-def cell_match(
+def cell_match[K: CellKey](
     expected: Any,
     actual: Any,
-    field: str,
+    field: K,
     *,
-    fuzzy_field_thresholds: Mapping[str, float],
+    fuzzy_field_thresholds: Mapping[K, float],
     field_schema: Any = None,
 ) -> bool:
     threshold = fuzzy_field_thresholds.get(field)
@@ -136,11 +138,7 @@ def cell_match(
         )
     if isinstance(expected, str) and isinstance(actual, str):
         return normalize_ws(expected) == normalize_ws(actual)
-    # Nullable numeric fields treat 0 / 0.0 and None as equivalent. Gated on
-    # the JSON Schema shape so plain numeric fields keep strict semantics.
-    if _is_nullable_numeric_field(field_schema):
-        expected = _normalize_nullable_numeric(expected)
-        actual = _normalize_nullable_numeric(actual)
+    # JSON scalars compare with ``==`` (``0 != None``).
     return bool(expected == actual)
 
 
@@ -199,14 +197,11 @@ def _cell_key(
     the same way scalars already do. Returns ``_UNHASHABLE`` when a cell still
     cannot be interned -> caller scores that column pairwise.
 
-    When ``field_schema`` is a nullable-numeric shape, ``0`` / ``0.0`` collapse
-    to ``None`` in the key so that null-vs-zero cells intern to the same slot,
-    matching the equality relaxation in ``cell_match``.
+    ``field_schema`` matches ``cell_match``'s keyword; intern keys come from
+    the value (whitespace-folded strings, tagged scalars, frozen JSON).
     """
     if isinstance(value, str):
         return ("s", normalize_ws(value))
-    if _is_nullable_numeric_field(field_schema):
-        value = _normalize_nullable_numeric(value)
     if isinstance(value, (list, dict)):
         return _eq_key(value)
     try:
@@ -216,10 +211,10 @@ def _cell_key(
     return ("v", value)
 
 
-def _intern_field(
+def _intern_field[K: CellKey](
     actual_list: Sequence[Any],
     expected_list: Sequence[Any],
-    field: str,
+    field: K,
     field_schema: Any = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Map each row's ``field`` cell to an int id shared across both sides.
@@ -246,37 +241,38 @@ def _intern_field(
     return out[0], out[1]
 
 
-def _row_match_key(
+def _row_match_key[K: CellKey](
     row: Any,
-    subfields: Sequence[str],
-    field_schemas: Mapping[str, Any] | None = None,
+    subfields: Sequence[K],
+    field_schemas: Mapping[K, Any] | None = None,
 ) -> tuple[Any, ...] | None:
     """Hashable full-row key whose equality implies zero assignment cost."""
     row_dict = row if isinstance(row, dict) else {}
     parts: list[Any] = []
+    schemas: Mapping[K, Any] = field_schemas if field_schemas is not None else {}
     for field in subfields:
         value = row_dict.get(field)
-        cell_key = _cell_key(value, (field_schemas or {}).get(field))
+        cell_key = _cell_key(value, schemas.get(field))
         if cell_key is _UNHASHABLE:
             return None
         parts.append(cell_key)
     return tuple(parts)
 
 
-def _can_peel_exact_rows(
-    subfields: Sequence[str],
-    fuzzy_field_thresholds: Mapping[str, float],
+def _can_peel_exact_rows[K: CellKey](
+    subfields: Sequence[K],
+    fuzzy_field_thresholds: Mapping[K, float],
 ) -> bool:
     return all(fuzzy_field_thresholds.get(field) is None for field in subfields)
 
 
-def peel_exact_row_matches(
-    actual_list: list[Any],
-    expected_list: list[Any],
+def peel_exact_row_matches[K: CellKey](
+    actual_list: Sequence[Any],
+    expected_list: Sequence[Any],
     *,
-    subfields: Sequence[str],
-    fuzzy_field_thresholds: Mapping[str, float],
-    field_schemas: Mapping[str, Any] | None = None,
+    subfields: Sequence[K],
+    fuzzy_field_thresholds: Mapping[K, float],
+    field_schemas: Mapping[K, Any] | None = None,
 ) -> _RowAssignment:
     """Pre-align zero-cost rows before building an expensive residual matrix.
 
@@ -303,7 +299,7 @@ def peel_exact_row_matches(
     for expected_idx, row in enumerate(expected_list):
         key = _row_match_key(row, subfields, field_schemas)
         bucket = actual_by_key.get(key) if key is not None else None
-        if bucket:
+        if bucket is not None and len(bucket) > 0:
             actual_idx = bucket.popleft()
             pairs.append((actual_idx, expected_idx))
             matched_actual.add(actual_idx)
@@ -318,13 +314,13 @@ def peel_exact_row_matches(
     )
 
 
-def mismatch_cost_matrix(
-    actual_list: list[Any],
-    expected_list: list[Any],
+def mismatch_cost_matrix[K: CellKey](
+    actual_list: Sequence[Any],
+    expected_list: Sequence[Any],
     *,
-    subfields: Sequence[str],
-    fuzzy_field_thresholds: Mapping[str, float],
-    field_schemas: Mapping[str, Any] | None = None,
+    subfields: Sequence[K],
+    fuzzy_field_thresholds: Mapping[K, float],
+    field_schemas: Mapping[K, Any] | None = None,
 ) -> np.ndarray:
     """Vectorized ``(n_actual, n_expected)`` matrix of mismatched-subfield counts.
 
