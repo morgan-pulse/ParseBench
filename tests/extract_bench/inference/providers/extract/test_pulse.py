@@ -75,7 +75,6 @@ def test_registered_pipelines_match_submitted_modes() -> None:
         assert pipeline.config["extensions"] == {"altOutputs": {"wlbb": True}}
         assert pipeline.config["schema_prompt"] == _PROMPT
         assert pipeline.config["async_run"] is True
-        assert pipeline.config["include_extract_cost_in_total"] is False
         assert pipeline.config["schema_terminal_retries"] == 1
         assert pipeline.config["run_timeout"] == 21000
         assert pipeline.per_file_timeout == 21600
@@ -195,8 +194,8 @@ def test_async_pipeline_omits_model_and_polls_accepted_jobs_without_resubmitting
     assert raw.raw_output["extract_cost_usd"] == pytest.approx(0.03)
     assert raw.raw_output["schema_credits_used"] == 2
     assert raw.raw_output["schema_cost_usd"] == pytest.approx(0.03)
-    assert raw.raw_output["credits_used"] == 2
-    assert raw.raw_output["cost_per_page_usd"] == pytest.approx(0.015)
+    assert raw.raw_output["credits_used"] == 4
+    assert raw.raw_output["cost_per_page_usd"] == pytest.approx(0.03)
     assert normalized.output.extracted_data == {"title": "Invoice"}
     assert len(normalized.output.field_citations) == 1
     assert normalized.output.field_citations[0].field_path == "title"
@@ -375,24 +374,6 @@ def test_cost_uses_document_page_count_and_official_credit_rates() -> None:
     assert estimated["cost_per_page_usd"] == pytest.approx(0.105)
     assert estimated["extract_credits_estimated"] is True
     assert estimated["schema_credits_estimated"] is True
-
-    schema_only = {
-        "extract": {"page_count": 2, "credits_used": 2},
-        "schema": {"credits_used": 12},
-        "_config": {
-            "effort": True,
-            "include_extract_cost_in_total": False,
-        },
-    }
-    _apply_usage_cost_fields(schema_only)
-
-    assert schema_only["extract_credits_used"] == 2
-    assert schema_only["extract_cost_usd"] == pytest.approx(0.03)
-    assert schema_only["schema_credits_used"] == 12
-    assert schema_only["schema_cost_usd"] == pytest.approx(0.18)
-    assert schema_only["credits_used"] == 12
-    assert schema_only["cost_usd"] == pytest.approx(0.18)
-    assert schema_only["cost_per_page_usd"] == pytest.approx(0.09)
 
 
 def test_anchor_index_covers_all_block_categories_and_never_invents_page() -> None:

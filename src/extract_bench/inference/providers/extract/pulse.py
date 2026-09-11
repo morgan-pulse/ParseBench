@@ -127,7 +127,6 @@ class PulseExtractProvider(Provider):
         self._schema_prompt: str | None = self.base_config.get("schema_prompt")
         self._schema_effort = bool(self.base_config.get("effort", self.base_config.get("schema_effort", False)))
         self._estimate_schema_cost = bool(self.base_config.get("estimate_schema_cost", True))
-        self._include_extract_cost_in_total = bool(self.base_config.get("include_extract_cost_in_total", True))
 
         for name, value in (
             ("request_timeout", self._request_timeout),
@@ -884,7 +883,6 @@ class PulseExtractProvider(Provider):
                 "schema_prompt": self._schema_prompt,
                 "effort": self._schema_effort,
                 "estimate_schema_cost": self._estimate_schema_cost,
-                "include_extract_cost_in_total": self._include_extract_cost_in_total,
                 "async_run": self._async_run,
                 "request_timeout": self._request_timeout,
                 "job_timeout": self._job_timeout,
@@ -1030,11 +1028,10 @@ def _apply_usage_cost_fields(raw_output: dict[str, Any]) -> None:
         raw_output["schema_cost_usd"] = schema_credits * PulseExtractProvider.CREDIT_RATE_USD
         raw_output["schema_credits_estimated"] = schema_credits_estimated
 
-    include_extract_cost = bool(config.get("include_extract_cost_in_total", True))
-    reported_credits = (schema_credits or 0.0) + ((extract_credits or 0.0) if include_extract_cost else 0.0)
-    if reported_credits > 0:
-        raw_output["credits_used"] = reported_credits
-        raw_output["cost_usd"] = reported_credits * PulseExtractProvider.CREDIT_RATE_USD
+    total_credits = (extract_credits or 0.0) + (schema_credits or 0.0)
+    if total_credits > 0:
+        raw_output["credits_used"] = total_credits
+        raw_output["cost_usd"] = total_credits * PulseExtractProvider.CREDIT_RATE_USD
         if pages_used and pages_used > 0:
             raw_output["cost_per_page_usd"] = raw_output["cost_usd"] / pages_used
 

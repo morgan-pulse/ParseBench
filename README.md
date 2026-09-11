@@ -24,10 +24,10 @@ Models and prices reflect each provider's official documentation as of September
 
 | Rank | Provider | Category | Overall | Short | Medium | Long | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 9.00¢ |
+| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 10.50¢ |
 | 2 | LlamaExtract Agentic Plus | LlamaExtract | <u>95.59</u> | <u>96.56</u> | <u>93.34</u> | **94.41** | 8.11¢ |
 | 3 | Codex (GPT-5.5) | Coding Agents | 93.57 | 95.68 | 91.15 | 78.88 | 27.83¢ |
-| 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 1.50¢ |
+| 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 3.00¢ |
 | 5 | OpenAI GPT-6 Astra | Commercial VLM | 91.91 | **97.22** | 90.56 | 31.70 | 11.09¢ |
 | 6 | Reducto Deep Extract | Specialized APIs | 90.44 | 94.20 | 80.47 | 92.01 | 34.44¢ |
 | 7 | Qwen3.8 Flash Next | OSS | 89.88 | 94.82 | 87.81 | 37.74 | — |

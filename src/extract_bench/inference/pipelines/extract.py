@@ -398,7 +398,6 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
             "Extract the document into the provided JSON schema. Use only information present in the document."
         ),
         "async_run": True,
-        "include_extract_cost_in_total": False,
         "request_timeout": 900.0,
         "job_timeout": 7200.0,
         "capacity_retry_timeout": 14400.0,
