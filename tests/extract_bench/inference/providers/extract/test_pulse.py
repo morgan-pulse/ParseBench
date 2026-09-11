@@ -8,7 +8,11 @@ import pytest
 import requests
 
 from extract_bench.inference.pipelines import get_pipeline
-from extract_bench.inference.providers.base import ProviderPermanentError
+from extract_bench.inference.providers.base import (
+    ProviderPermanentError,
+    ProviderRateLimitError,
+    ProviderTransientError,
+)
 from extract_bench.inference.providers.extract.pulse import (
     PulseExtractProvider,
     _apply_usage_cost_fields,
@@ -47,7 +51,6 @@ def _provider(config: dict[str, Any] | None = None) -> PulseExtractProvider:
             "api_base_url": "https://pulse.test",
             "request_timeout": 1,
             "job_timeout": 10,
-            "capacity_retry_timeout": 10,
             "poll_interval": 0.001,
             "poll_max_interval": 0.001,
             **(config or {}),
@@ -75,9 +78,8 @@ def test_registered_pipelines_match_submitted_modes() -> None:
         assert pipeline.config["extensions"] == {"altOutputs": {"wlbb": True}}
         assert pipeline.config["schema_prompt"] == _PROMPT
         assert pipeline.config["async_run"] is True
-        assert pipeline.config["schema_terminal_retries"] == 1
-        assert pipeline.config["run_timeout"] == 21000
-        assert pipeline.per_file_timeout == 21600
+        assert set(pipeline.config) == {"model", "extensions", "schema_prompt", "async_run", "effort"}
+        assert pipeline.per_file_timeout is None
 
     assert non_effort.config["effort"] is False
     assert effort.config["effort"] is True
@@ -244,7 +246,7 @@ def test_submission_transport_failure_is_not_replayed(
         "Temporary schema failure. Please resubmit the request.",
     ],
 )
-def test_known_terminal_schema_failure_retries_schema_only(
+def test_known_terminal_schema_failure_is_transient_for_the_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     terminal_error: str,
@@ -252,49 +254,52 @@ def test_known_terminal_schema_failure_retries_schema_only(
     source = tmp_path / "invoice.pdf"
     source.write_bytes(b"%PDF-1.4\n")
     pipeline = get_pipeline("pulse_schema_effort")
-    provider = _provider(
-        {
-            **pipeline.config,
-            "schema_retry_interval": 0,
-        }
-    )
-    extract_calls = 0
-    schema_extraction_ids: list[str] = []
+    provider = _provider(pipeline.config)
+    schema_calls = 0
 
     def fake_extract(*_: Any, **__: Any) -> dict[str, Any]:
-        nonlocal extract_calls
-        extract_calls += 1
         return {"extraction_id": "extract-1", "page_count": 1}
 
-    def fake_schema(extraction_id: str, **_: Any) -> dict[str, Any]:
-        schema_extraction_ids.append(extraction_id)
-        if len(schema_extraction_ids) == 1:
-            raise ProviderPermanentError(
-                "Pulse schema job schema-job-1 ended with status=failed",
-                job_id="schema-job-1",
-                debug_payload={
-                    "context": "schema",
-                    "job_id": "schema-job-1",
-                    "state": {
-                        "status": "failed",
-                        "error": terminal_error,
-                    },
-                },
-            )
-        return {"schema_output": {"values": {"title": "Invoice"}}}
+    def fake_schema(**_: Any) -> dict[str, Any]:
+        nonlocal schema_calls
+        schema_calls += 1
+        raise ProviderPermanentError(
+            "Pulse schema job schema-job-1 ended with status=failed",
+            job_id="schema-job-1",
+            debug_payload={
+                "context": "schema",
+                "job_id": "schema-job-1",
+                "state": {"status": "failed", "error": terminal_error},
+            },
+        )
 
     monkeypatch.setattr(provider, "_extract_file", fake_extract)
     monkeypatch.setattr(provider, "_apply_schema", fake_schema)
 
-    raw = provider.run_inference(
-        pipeline,
-        _request(source, {"type": "object", "properties": {"title": {"type": "string"}}}),
-    )
+    with pytest.raises(ProviderTransientError) as excinfo:
+        provider.run_inference(
+            pipeline,
+            _request(source, {"type": "object", "properties": {"title": {"type": "string"}}}),
+        )
 
-    assert extract_calls == 1
-    assert schema_extraction_ids == ["extract-1", "extract-1"]
-    assert raw.raw_output["schema"]["schema_output"]["values"] == {"title": "Invoice"}
-    assert raw.raw_output["schema_retry_failures"][0]["job_id"] == "schema-job-1"
+    assert schema_calls == 1
+    assert excinfo.value.job_id == "schema-job-1"
+
+
+def test_rate_limited_submission_raises_without_waiting() -> None:
+    provider = _provider({"async_run": True})
+    control = provider._register_request("invoice/doc-1")
+    calls = 0
+
+    def submit(_: float) -> _FakeResponse:
+        nonlocal calls
+        calls += 1
+        return _FakeResponse({"error": "capacity"}, status_code=429, headers={"Retry-After": "60"})
+
+    with pytest.raises(ProviderRateLimitError, match="rate-limited"):
+        provider._submit(submit, context="extract submission", control=control)
+
+    assert calls == 1
 
 
 def test_large_result_only_forwards_api_key_to_pulse_origin(
@@ -487,7 +492,7 @@ def test_replacement_attempt_cannot_be_erased_by_old_attempt_cleanup(
     assert provider._inflight_jobs["invoice/doc-1"] == (new_control, "new-job")
 
 
-def test_cancelled_attempt_never_enters_capacity_submission() -> None:
+def test_cancelled_attempt_never_submits() -> None:
     provider = _provider({"async_run": True})
     control = provider._register_request("invoice/doc-1")
     control.cancelled.set()
@@ -499,7 +504,7 @@ def test_cancelled_attempt_never_enters_capacity_submission() -> None:
         return _FakeResponse({"job_id": "should-not-exist"})
 
     with pytest.raises(ProviderPermanentError, match="cancelled by the benchmark runner"):
-        provider._post_with_capacity_retry(
+        provider._submit(
             submit,
             context="extract submission",
             control=control,

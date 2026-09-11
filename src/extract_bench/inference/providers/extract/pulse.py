@@ -41,9 +41,8 @@ from extract_bench.schemas.product import ProductType
 
 _API_BASE_URL = "https://api.runpulse.com"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 900.0
-_DEFAULT_JOB_TIMEOUT_SECONDS = 2 * 60 * 60.0
-_DEFAULT_CAPACITY_RETRY_SECONDS = 4 * 60 * 60.0
-_DEFAULT_RUN_TIMEOUT_SECONDS = 21_000.0
+_DEFAULT_JOB_TIMEOUT_SECONDS = 1800.0
+_DEFAULT_RUN_TIMEOUT_SECONDS = 1800.0
 _POLL_RETRYABLE_STATUS_CODES = {404, 429, 500, 502, 503, 504}
 _JOB_SUCCESS_STATUSES = {"completed", "complete", "done"}
 _JOB_FAILURE_STATUSES = {"failed", "error", "canceled", "cancelled", "expired"}
@@ -117,12 +116,7 @@ class PulseExtractProvider(Provider):
         self._poll_interval = float(self.base_config.get("poll_interval", os.getenv("PULSE_POLL_INTERVAL", 5.0)))
         self._poll_max_interval = float(self.base_config.get("poll_max_interval", 30.0))
         self._max_poll_errors = int(self.base_config.get("max_poll_errors", 12))
-        self._capacity_retry_timeout = float(
-            self.base_config.get("capacity_retry_timeout", _DEFAULT_CAPACITY_RETRY_SECONDS)
-        )
         self._run_timeout = float(self.base_config.get("run_timeout", _DEFAULT_RUN_TIMEOUT_SECONDS))
-        self._schema_terminal_retries = int(self.base_config.get("schema_terminal_retries", 0))
-        self._schema_retry_interval = float(self.base_config.get("schema_retry_interval", 5.0))
         self._async_run = bool(self.base_config.get("async_run", self.base_config.get("async", False)))
         self._schema_prompt: str | None = self.base_config.get("schema_prompt")
         self._schema_effort = bool(self.base_config.get("effort", self.base_config.get("schema_effort", False)))
@@ -133,18 +127,12 @@ class PulseExtractProvider(Provider):
             ("job_timeout", self._job_timeout),
             ("poll_interval", self._poll_interval),
             ("poll_max_interval", self._poll_max_interval),
-            ("capacity_retry_timeout", self._capacity_retry_timeout),
             ("run_timeout", self._run_timeout),
         ):
             if value <= 0:
                 raise ProviderConfigError(f"{name} must be greater than zero")
-        for name, value in (
-            ("max_poll_errors", self._max_poll_errors),
-            ("schema_terminal_retries", self._schema_terminal_retries),
-            ("schema_retry_interval", self._schema_retry_interval),
-        ):
-            if value < 0:
-                raise ProviderConfigError(f"{name} must be non-negative")
+        if self._max_poll_errors < 0:
+            raise ProviderConfigError("max_poll_errors must be non-negative")
 
         self._inflight_lock = threading.Lock()
         self._attempts: dict[str, _AttemptControl] = {}
@@ -301,55 +289,38 @@ class PulseExtractProvider(Provider):
             job_id=job_id,
         )
 
-    def _post_with_capacity_retry(
+    def _submit(
         self,
         request_fn: Callable[[float], requests.Response],
         *,
         context: str,
         control: _AttemptControl,
     ) -> requests.Response:
-        """Retry explicit 429 rejections without replaying an accepted job."""
-        capacity_deadline = time.monotonic() + self._capacity_retry_timeout
-        attempt = 0
-        while True:
-            attempt += 1
-            self._ensure_active(control, context=context, stage_deadline=capacity_deadline)
-            try:
-                response = request_fn(
-                    self._bounded_request_timeout(control, context=context, stage_deadline=capacity_deadline)
-                )
-            except requests.RequestException as exc:
-                raise ProviderPermanentError(
-                    f"Pulse {context} did not return a response; submission outcome is unknown, "
-                    "so it was not automatically retried",
-                    debug_payload={
-                        "context": context,
-                        "exception_type": type(exc).__name__,
-                        "exception": str(exc),
-                        "submission_outcome": "unknown",
-                    },
-                ) from exc
-
-            if response.status_code != 429:
-                return response
-            delay = self._retry_after_seconds(response, attempt)
-            if time.monotonic() + delay >= capacity_deadline:
-                raise ProviderPermanentError(
-                    f"Pulse {context} remained rate-limited for {self._capacity_retry_timeout:.0f}s; "
-                    "no job was accepted",
-                    debug_payload={
-                        "context": context,
-                        "http_status": 429,
-                        "response": response.text[:2000],
-                        "attempts": attempt,
-                    },
-                )
-            self._interruptible_wait(
-                control,
-                delay,
-                context=f"{context} capacity wait",
-                stage_deadline=capacity_deadline,
+        """Submit once; a 429 is handed to the runner's retry ladder."""
+        self._ensure_active(control, context=context)
+        try:
+            response = request_fn(self._bounded_request_timeout(control, context=context))
+        except requests.RequestException as exc:
+            raise ProviderPermanentError(
+                f"Pulse {context} did not return a response; submission outcome is unknown, "
+                "so it was not automatically retried",
+                debug_payload={
+                    "context": context,
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                    "submission_outcome": "unknown",
+                },
+            ) from exc
+        if response.status_code == 429:
+            raise ProviderRateLimitError(
+                f"Pulse {context} was rate-limited (429); no job was accepted",
+                debug_payload={
+                    "context": context,
+                    "http_status": 429,
+                    "response": response.text[:2000],
+                },
             )
+        return response
 
     def _same_origin(self, url: str) -> bool:
         base = urlparse(self._api_base_url)
@@ -730,7 +701,7 @@ class PulseExtractProvider(Provider):
                     allow_redirects=False,
                 )
 
-        response = self._post_with_capacity_retry(
+        response = self._submit(
             submit,
             context="extract submission",
             control=control,
@@ -778,7 +749,7 @@ class PulseExtractProvider(Provider):
                 allow_redirects=False,
             )
 
-        response = self._post_with_capacity_retry(
+        response = self._submit(
             submit,
             context="schema submission",
             control=control,
@@ -823,40 +794,22 @@ class PulseExtractProvider(Provider):
             if not isinstance(extraction_id, str) or not extraction_id:
                 raise ProviderPermanentError(f"Pulse /extract response did not include extraction_id: {extract_raw}")
 
-            schema_retry_failures: list[dict[str, Any]] = []
-            for schema_attempt in range(self._schema_terminal_retries + 1):
-                try:
-                    schema_raw = self._apply_schema(
-                        extraction_id=extraction_id,
-                        schema=request.schema_override,
-                        example_id=request.example_id,
-                        control=control,
-                    )
-                    self._ensure_active(control, context="schema completion")
-                    break
-                except ProviderPermanentError as exc:
-                    if schema_attempt >= self._schema_terminal_retries or not _is_retryable_schema_terminal_error(exc):
-                        raise
-                    schema_retry_failures.append(
-                        {
-                            "attempt": schema_attempt + 1,
-                            "job_id": exc.job_id,
-                            "error": str(exc),
-                            "debug_payload": exc.debug_payload,
-                        }
-                    )
-                    try:
-                        self._interruptible_wait(
-                            control,
-                            self._schema_retry_interval,
-                            context="schema retry wait",
-                        )
-                    except ProviderPermanentError as retry_exc:
-                        retry_exc.debug_payload = {
-                            **(retry_exc.debug_payload or {}),
-                            "schema_retry_failures": schema_retry_failures,
-                        }
-                        raise retry_exc from exc
+            try:
+                schema_raw = self._apply_schema(
+                    extraction_id=extraction_id,
+                    schema=request.schema_override,
+                    example_id=request.example_id,
+                    control=control,
+                )
+            except ProviderPermanentError as exc:
+                if not _is_retryable_schema_terminal_error(exc):
+                    raise
+                raise ProviderTransientError(
+                    str(exc),
+                    job_id=exc.job_id,
+                    debug_payload=exc.debug_payload,
+                ) from exc
+            self._ensure_active(control, context="schema completion")
         except (
             ProviderPermanentError,
             ProviderTransientError,
@@ -889,12 +842,8 @@ class PulseExtractProvider(Provider):
                 "run_timeout": self._run_timeout,
                 "poll_interval": self._poll_interval,
                 "poll_max_interval": self._poll_max_interval,
-                "schema_terminal_retries": self._schema_terminal_retries,
-                "schema_retry_interval": self._schema_retry_interval,
             },
         }
-        if schema_retry_failures:
-            raw_output["schema_retry_failures"] = schema_retry_failures
         schema_job = _as_mapping(schema_raw.get("_pulse_job"))
         if isinstance(schema_job.get("job_id"), str):
             raw_output["job_id"] = schema_job["job_id"]
@@ -981,7 +930,7 @@ def _content_type_for_path(path: Path) -> str:
 
 
 def _is_retryable_schema_terminal_error(exc: ProviderPermanentError) -> bool:
-    """Allow one new schema job only after a known, explicit terminal failure."""
+    """A terminal schema failure that Pulse itself asks the caller to resubmit."""
     debug = _as_mapping(exc.debug_payload)
     state = _as_mapping(debug.get("state"))
     status = str(state.get("status") or state.get("job_status") or "").lower()

@@ -399,14 +399,6 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
             "Extract the document into the provided JSON schema. Use only information present in the document."
         ),
         "async_run": True,
-        "request_timeout": 900.0,
-        "job_timeout": 7200.0,
-        "capacity_retry_timeout": 14400.0,
-        "run_timeout": 21000.0,
-        "poll_interval": 5.0,
-        "poll_max_interval": 30.0,
-        "schema_terminal_retries": 1,
-        "schema_retry_interval": 5.0,
     }
     for _mode, _effort in (("non_effort", False), ("effort", True)):
         register_fn(
@@ -414,7 +406,6 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
                 pipeline_name=f"pulse_schema_{_mode}",
                 provider_name="pulse_extract",
                 config={**pulse_schema_common, "effort": _effort},
-                per_file_timeout=21600.0,
             )
         )
 
