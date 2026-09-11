@@ -35,7 +35,7 @@ Models and prices reflect each provider's official documentation as of September
 | 9 | LlamaExtract Agentic | LlamaExtract | 89.55 | 92.03 | 85.41 | 78.62 | 3.12¢ |
 | 10 | Extend (Max Context) | Specialized APIs | 88.62 | 92.32 | 78.75 | 90.46 | 10.00¢ |
 
-Top 10 of 38 systems — full table in [leaderboard.csv](leaderboard.csv).
+Top 10 of 39 systems — full table in [leaderboard.csv](leaderboard.csv).
 <!-- LEADERBOARD:END -->
 
 <!-- GROUNDING:START -->
@@ -56,7 +56,7 @@ Top 10 of 38 systems — full table in [leaderboard.csv](leaderboard.csv).
     <tr><td align="right">7</td><td>Pulse (Effort)</td><td align="right">11.02</td><td align="right">9.81</td><td align="right">15.73</td><td align="right">9.98</td><td align="right"><u>80.45</u></td><td align="right"><u>78.58</u></td><td align="right"><strong>85.74</strong></td><td align="right"><u>78.80</u></td></tr>
     <tr><td align="right">8</td><td>Pulse (Non-effort)</td><td align="right">8.18</td><td align="right">8.39</td><td align="right">6.80</td><td align="right">10.38</td><td align="right">74.12</td><td align="right">74.50</td><td align="right"><u>73.00</u></td><td align="right">74.67</td></tr>
     <tr><td align="right">9</td><td>Datalab (Accurate + Balanced)</td><td align="right">2.02</td><td align="right">2.67</td><td align="right">0.24</td><td align="right">0.00</td><td align="right">48.50</td><td align="right">56.90</td><td align="right">38.55</td><td align="right">0.01</td></tr>
-    <tr><td align="right">—</td><td><em>All 29 other systems</em></td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td></tr>
+    <tr><td align="right">—</td><td><em>All 30 other systems</em></td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td></tr>
   </tbody>
 </table>
 <!-- GROUNDING:END -->
