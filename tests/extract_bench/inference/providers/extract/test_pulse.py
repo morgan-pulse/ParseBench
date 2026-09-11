@@ -71,7 +71,7 @@ def test_registered_pipelines_match_submitted_modes() -> None:
     for pipeline in (non_effort, effort):
         assert pipeline.provider_name == "pulse_extract"
         assert pipeline.product_type == ProductType.EXTRACT
-        assert "model" not in pipeline.config
+        assert pipeline.config["model"] == "pulse-ultra-2"
         assert pipeline.config["extensions"] == {"altOutputs": {"wlbb": True}}
         assert pipeline.config["schema_prompt"] == _PROMPT
         assert pipeline.config["async_run"] is True
@@ -83,7 +83,7 @@ def test_registered_pipelines_match_submitted_modes() -> None:
     assert effort.config["effort"] is True
 
 
-def test_async_pipeline_omits_model_and_polls_accepted_jobs_without_resubmitting(
+def test_async_pipeline_pins_ultra_2_and_polls_accepted_jobs_without_resubmitting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,6 +168,7 @@ def test_async_pipeline_omits_model_and_polls_accepted_jobs_without_resubmitting
     assert len(post_calls) == 2
     assert post_calls[0]["url"] == "https://pulse.test/extract"
     assert post_calls[0]["fields"] == {
+        "model": "pulse-ultra-2",
         "async": "true",
         "extensions": json.dumps({"altOutputs": {"wlbb": True}}),
     }

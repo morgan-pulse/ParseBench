@@ -393,6 +393,7 @@ def register_extract_pipelines(register_fn) -> None:  # type: ignore[no-untyped-
         )
 
     pulse_schema_common = {
+        "model": "pulse-ultra-2",
         "extensions": {"altOutputs": {"wlbb": True}},
         "schema_prompt": (
             "Extract the document into the provided JSON schema. Use only information present in the document."
