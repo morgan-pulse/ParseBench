@@ -24,7 +24,7 @@ Models and prices reflect each provider's official documentation as of September
 
 | Rank | Provider | Category | Overall | Short | Medium | Long | ¢ / Page |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | Pulse (Effort) | Specialized APIs | **95.73** | 96.37 | **94.53** | <u>93.56</u> | 10.50¢ |
+| 1 | Pulse (Effort) | Specialized APIs | **95.91** | 96.46 | **95.01** | <u>93.51</u> | 10.50¢ |
 | 2 | LlamaExtract Agentic Plus | LlamaExtract | <u>95.59</u> | <u>96.56</u> | <u>93.34</u> | **94.41** | 8.11¢ |
 | 3 | Codex (GPT-5.5) | Coding Agents | 93.57 | 95.68 | 91.15 | 78.88 | 27.83¢ |
 | 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 3.00¢ |
