@@ -17,7 +17,7 @@ The benchmark covers **370 documents (4,869 pages)** across 8 business domains a
 
 ## Leaderboard
 
-Models and prices reflect each provider's official documentation as of September 10, 2026; each system uses its recommended configuration.
+Models and prices reflect each provider's official documentation as of September 11, 2026; each system uses its recommended configuration.
 
 <!-- LEADERBOARD:START -->
 **Unified value F1** — the headline metric. Every score is an unweighted mean over documents; each document counts once, whatever its length. For raw data including per-split precision and recall, cost, and latency, see [leaderboard.csv](leaderboard.csv). The best score in each Overall, Short, Medium, and Long column is **bold**; the second-best distinct score is <u>underlined</u>.
