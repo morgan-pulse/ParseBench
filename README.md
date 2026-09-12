@@ -27,7 +27,7 @@ Models and prices reflect each provider's official documentation as of September
 | 1 | Pulse (Effort) | Specialized APIs | **95.91** | 96.46 | **95.01** | <u>93.51</u> | 10.50¢ |
 | 2 | LlamaExtract Agentic Plus | LlamaExtract | <u>95.59</u> | <u>96.56</u> | <u>93.34</u> | **94.41** | 8.11¢ |
 | 3 | Codex (GPT-5.5) | Coding Agents | 93.57 | 95.68 | 91.15 | 78.88 | 27.83¢ |
-| 4 | Pulse (Non-effort) | Specialized APIs | 93.20 | 94.05 | 91.69 | 89.86 | 3.00¢ |
+| 4 | Pulse (Non-effort) | Specialized APIs | 92.70 | 93.17 | 92.22 | 89.07 | 3.00¢ |
 | 5 | OpenAI GPT-6 Astra | Commercial VLM | 91.91 | **97.22** | 90.56 | 31.70 | 11.09¢ |
 | 6 | Reducto Deep Extract | Specialized APIs | 90.44 | 94.20 | 80.47 | 92.01 | 34.44¢ |
 | 7 | Qwen3.8 Flash Next | OSS | 89.88 | 94.82 | 87.81 | 37.74 | — |
@@ -47,15 +47,15 @@ Top 10 of 39 systems — full table in [leaderboard.csv](leaderboard.csv).
     <tr><th align="right">Overall</th><th align="right">Short</th><th align="right">Medium</th><th align="right">Long</th><th align="right">Overall</th><th align="right">Short</th><th align="right">Medium</th><th align="right">Long</th></tr>
   </thead>
   <tbody>
-    <tr><td align="right">1</td><td>LlamaExtract Agentic Plus</td><td align="right"><strong>46.43</strong></td><td align="right"><strong>43.74</strong></td><td align="right"><strong>54.01</strong></td><td align="right"><strong>54.67</strong></td><td align="right"><strong>84.92</strong></td><td align="right"><strong>89.70</strong></td><td align="right">72.25</td><td align="right"><strong>87.14</strong></td></tr>
+    <tr><td align="right">1</td><td>LlamaExtract Agentic Plus</td><td align="right"><strong>46.43</strong></td><td align="right"><strong>43.74</strong></td><td align="right"><strong>54.01</strong></td><td align="right"><strong>54.67</strong></td><td align="right"><strong>84.92</strong></td><td align="right"><strong>89.70</strong></td><td align="right"><u>72.25</u></td><td align="right"><strong>87.14</strong></td></tr>
     <tr><td align="right">2</td><td>LlamaExtract Agentic</td><td align="right"><u>44.14</u></td><td align="right">42.30</td><td align="right"><u>50.47</u></td><td align="right"><u>45.68</u></td><td align="right">66.12</td><td align="right">69.73</td><td align="right">56.59</td><td align="right">67.60</td></tr>
     <tr><td align="right">3</td><td>Reducto Deep Extract</td><td align="right">43.30</td><td align="right"><u>42.84</u></td><td align="right">45.57</td><td align="right">41.13</td><td align="right">71.71</td><td align="right">72.60</td><td align="right">70.42</td><td align="right">67.28</td></tr>
     <tr><td align="right">4</td><td>LlamaExtract Cost-Effective</td><td align="right">40.43</td><td align="right">40.20</td><td align="right">42.30</td><td align="right">36.67</td><td align="right">64.15</td><td align="right">68.90</td><td align="right">53.73</td><td align="right">56.55</td></tr>
     <tr><td align="right">5</td><td>Extend (Max Context)</td><td align="right">25.20</td><td align="right">33.93</td><td align="right">0.21</td><td align="right">0.02</td><td align="right">49.04</td><td align="right">61.71</td><td align="right">27.68</td><td align="right">0.03</td></tr>
     <tr><td align="right">6</td><td>Extend Extract</td><td align="right">15.96</td><td align="right">21.13</td><td align="right">1.03</td><td align="right">0.01</td><td align="right">53.58</td><td align="right">64.50</td><td align="right">37.39</td><td align="right">0.03</td></tr>
-    <tr><td align="right">7</td><td>Pulse (Effort)</td><td align="right">11.02</td><td align="right">9.81</td><td align="right">15.73</td><td align="right">9.98</td><td align="right"><u>80.45</u></td><td align="right"><u>78.58</u></td><td align="right"><strong>85.74</strong></td><td align="right"><u>78.80</u></td></tr>
-    <tr><td align="right">8</td><td>Pulse (Non-effort)</td><td align="right">8.18</td><td align="right">8.39</td><td align="right">6.80</td><td align="right">10.38</td><td align="right">74.12</td><td align="right">74.50</td><td align="right"><u>73.00</u></td><td align="right">74.67</td></tr>
-    <tr><td align="right">9</td><td>Datalab (Accurate + Balanced)</td><td align="right">2.02</td><td align="right">2.67</td><td align="right">0.24</td><td align="right">0.00</td><td align="right">48.50</td><td align="right">56.90</td><td align="right">38.55</td><td align="right">0.01</td></tr>
+    <tr><td align="right">7</td><td>Datalab (Accurate + Balanced)</td><td align="right">2.02</td><td align="right">2.67</td><td align="right">0.24</td><td align="right">0.00</td><td align="right">48.50</td><td align="right">56.90</td><td align="right">38.55</td><td align="right">0.01</td></tr>
+    <tr><td align="right">8</td><td>Pulse (Effort)</td><td align="right">1.49</td><td align="right">1.17</td><td align="right">3.03</td><td align="right">0.04</td><td align="right"><u>79.70</u></td><td align="right"><u>77.40</u></td><td align="right"><strong>86.19</strong></td><td align="right">77.74</td></tr>
+    <tr><td align="right">9</td><td>Pulse (Non-effort)</td><td align="right">0.71</td><td align="right">0.82</td><td align="right">0.49</td><td align="right">0.01</td><td align="right">73.42</td><td align="right">73.81</td><td align="right">69.86</td><td align="right"><u>84.72</u></td></tr>
     <tr><td align="right">—</td><td><em>All 30 other systems</em></td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td><td align="right">0.00</td></tr>
   </tbody>
 </table>
