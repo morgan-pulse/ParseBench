@@ -210,6 +210,8 @@ uv run extract-bench status
 
 [ExtractBench Pro](https://huggingface.co/datasets/llamaindex/ExtractBenchPro) contains 100 documents across six challenges: document conventions, house vocabulary, house counting rules, drawn relations, charts inside documents, and long chart sheets. It uses the same evaluator as ExtractBench. Read the [ExtractBench Pro launch post](https://www.llamaindex.ai/blog/introducing-extractbench-pro) for the challenges and results.
 
+Pulse (Effort) submission: **27% perfect documents (27/100)**.
+
 Download the PDFs, schemas, ground truth, and scoring rules into the layout the harness reads:
 
 ```bash
